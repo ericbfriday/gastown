@@ -72,7 +72,7 @@ claude -p "Initial prompt" \
 
 **Goal:** Run N concurrent agents with lock-free coordination
 
-**Status:** Design complete, ready for implementation
+**Status:** Planning complete, ready for implementation (2026-01-28)
 
 **Key Design:** Lock-free coordination via atomic filesystem operations
 - Atomic work claiming via hard links (`ln` command)
@@ -111,7 +111,12 @@ claude -p "Initial prompt" \
 **Estimated Effort:** 4 weeks
 **Target Throughput:** 2.5x with 3 agents (allowing 17% overhead)
 
-**See:** `docs/research/parallel-coordination-design.md` for complete design
+**Documentation:**
+- `docs/research/parallel-coordination-design.md` - Complete technical design (1,818 lines)
+- `docs/PHASE-3-PLAN.md` - Implementation plan with architecture and integration approach
+- `docs/PHASE-3-MILESTONES.md` - Week-by-week breakdown with tasks and acceptance criteria
+- `docs/PHASE-3-TESTING.md` - Comprehensive testing strategy (~60 tests planned)
+- `docs/PHASE-3-RISKS.md` - Risk analysis with mitigation and contingency plans
 
 ### 🔜 Phase 4: Knowledge & Documentation (PLANNED)
 
