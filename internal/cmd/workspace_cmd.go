@@ -23,6 +23,11 @@ WORKSPACE TYPES:
   refinery: Merge queue worktree
   town:     Town-level workspace
 
+Commands for workspace lifecycle:
+  gt workspace init <rig> <name>     Create new workspace
+  gt workspace add <rig> <path>      Register existing workspace
+  gt workspace list [<rig>]          List workspaces with status
+
 Commands for workspace maintenance:
   gt workspace status [path]         Show workspace state and cleanliness
   gt workspace clean                 Clean temporary files
@@ -31,6 +36,9 @@ Commands for workspace maintenance:
 	}
 
 	cmd.AddCommand(
+		newWorkspaceInitCmd(),
+		newWorkspaceAddCmd(),
+		newWorkspaceListCmd(),
 		newWorkspaceCleanCmd(),
 		newWorkspaceStatusCmd(),
 		newWorkspaceConfigCmd(),
