@@ -1,0 +1,178 @@
+# Claude Automation Harness Configuration
+
+harness:
+  # Loop control
+  max_iterations: 0  # 0 = infinite, or set to specific number for testing
+  iteration_delay: 5  # seconds between iterations
+  interrupt_check_interval: 30  # seconds between interrupt checks
+
+  # Agent spawning
+  agent_type: claude-sonnet  # Model to use (claude-sonnet, claude-opus, etc.)
+  session_timeout: 3600  # Max session duration in seconds (1 hour)
+  parallel_agents: 1  # Number of concurrent agent sessions (future feature)
+
+  # Work routing
+  default_rig: aardwolf_snd  # Default rig if none specified
+  rig_priority:  # Order for checking work across rigs
+    - aardwolf_snd
+    - duneagent
+
+  # Work queue
+  queue:
+    refresh_interval: 60  # Refresh queue from beads/gt every N seconds
+    max_queue_size: 100  # Maximum items to track in queue
+    priority_weights:  # How to prioritize work
+      high: 10
+      medium: 5
+      low: 1
+
+  # Interrupt conditions (what triggers human attention)
+  interrupts:
+    quality_gate_failure: true  # Test failures, build errors
+    blocked_work: true  # Work is blocked by dependencies
+    approval_required: true  # Manual approval gates
+    ambiguous_requirement: true  # Unclear specifications
+    session_timeout: true  # Session runs too long
+    error_threshold: 3  # Number of consecutive errors before interrupt
+
+  # Knowledge preservation
+  knowledge:
+    preserve_research: true  # Auto-preserve research notes
+    serena_integration: true  # Integrate with Serena memories
+    session_summaries: true  # Generate session summary documents
+    auto_document_decisions: true  # Prompt agents to document decisions
+
+  # Notifications (gt mail integration)
+  notifications:
+    notify_on_interrupt: overseer  # Who to notify on interrupts
+    notify_on_completion: false  # Notify on successful completion
+    notify_on_error: overseer  # Notify on errors/failures
+    notify_on_quality_gate: false  # Notify on test failures
+
+  # Logging
+  logging:
+    level: info  # debug, info, warn, error
+    iteration_log: state/iteration.log
+    session_logs: docs/sessions/
+    keep_logs_days: 30  # How long to keep old logs
+
+  # Safety limits
+  safety:
+    max_consecutive_failures: 5  # Stop after N failures in a row
+    max_session_memory_mb: 8192  # Memory limit per session
+    require_tests_pass: true  # Don't complete work with failing tests
+    require_clean_git: true  # Require clean git state before completion
+
+# Agent configuration
+agent:
+  # Bootstrap prompt template
+  bootstrap_prompt: prompts/bootstrap.md
+
+  # Required commands in environment
+  required_commands:
+    - gt
+    - bd
+    - git
+    - jq
+
+  # Context building
+  context:
+    # Essential documentation to reference
+    essential_docs:
+      - ~/gt/GASTOWN-CLAUDE.md
+      - ~/gt/AGENTS.md
+
+    # Where to find research
+    research_paths:
+      - ~/gt/harness/docs/research/
+      - ~/.serena/memories/
+      - ~/gt/harness/docs/sessions/
+
+  # Work patterns
+  patterns:
+    polecat:
+      branch_prefix: polecat/
+      auto_cleanup: true
+      use_merge_queue: true
+      close_own_issues: false
+
+    crew:
+      branch_prefix: feature/
+      auto_cleanup: false
+      use_merge_queue: false
+      close_own_issues: true
+
+# Rig-specific configuration
+rigs:
+  aardwolf_snd:
+    path: ~/gt/aardwolf_snd
+    main_branch: main
+    test_command: "cd mayor/rig && go test ./..."
+    build_command: "cd mayor/rig && go build ./..."
+
+  duneagent:
+    path: ~/gt/duneagent
+    main_branch: main
+    test_command: "cd mayor/rig && npm test"
+    build_command: "cd mayor/rig && npm run build"
+
+# Quality gates
+quality_gates:
+  pre_work:
+    - name: "Check main health"
+      command: "git checkout main && {{rig.test_command}}"
+      required: false  # Don't block if main is broken, just file issue
+      on_failure: "file_issue"
+
+  post_work:
+    - name: "Run tests"
+      command: "{{rig.test_command}}"
+      required: true
+      on_failure: "interrupt"
+
+    - name: "Check build"
+      command: "{{rig.build_command}}"
+      required: true
+      on_failure: "interrupt"
+
+    - name: "Verify clean git"
+      command: "git status --porcelain"
+      required: true
+      expect_empty: true
+      on_failure: "interrupt"
+
+# Monitoring & observability
+monitoring:
+  metrics:
+    enabled: true
+    metrics_file: state/metrics.json
+
+  track:
+    - iterations_per_hour
+    - work_items_completed
+    - average_session_duration
+    - interrupt_frequency
+    - research_documents_created
+    - success_rate
+
+  dashboard:
+    enabled: false  # Future: web dashboard
+    port: 8080
+    refresh_interval: 10
+
+# Future features (not yet implemented)
+future:
+  parallel_agents:
+    enabled: false
+    max_concurrent: 3
+    work_stealing: false
+
+  learning:
+    track_patterns: false
+    optimize_routing: false
+    adaptive_interrupts: false
+
+  advanced_orchestration:
+    dependency_aware: false
+    critical_path: false
+    resource_aware: false
