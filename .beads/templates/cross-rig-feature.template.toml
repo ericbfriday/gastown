@@ -1,0 +1,72 @@
+# Cross-Rig Feature Template
+#
+# For adding a feature across multiple rigs in the town.
+# Example: "Add logging middleware to all rigs"
+#
+# Usage:
+#   bd create --template cross-rig-feature \
+#     --var feature="logging middleware" \
+#     --var rigs="gastown,beads,aardwolf_snd"
+
+name = "cross-rig-feature"
+description = "Add a feature across multiple rigs"
+version = 1
+
+# Template variables that must be provided
+[vars]
+[vars.feature]
+description = "Feature to add (e.g., 'logging middleware')"
+required = true
+
+[vars.rigs]
+description = "Comma-separated list of rigs (e.g., 'gastown,beads')"
+required = true
+
+[vars.priority]
+description = "Priority for all tasks (0-4)"
+default = "2"
+
+# Epic definition
+[epic]
+title = "Add {{feature}} to all rigs"
+description = """
+Cross-rig feature rollout: {{feature}}
+
+Target rigs: {{rigs}}
+
+## Context
+This epic tracks the rollout of {{feature}} across multiple rigs in the town.
+Each rig gets its own subtask for independent implementation and testing.
+
+## Acceptance
+- [ ] Feature implemented in all target rigs
+- [ ] Tests pass in all rigs
+- [ ] Documentation updated
+- [ ] Changes merged to main
+"""
+priority = "{{priority}}"
+type = "epic"
+
+# Subtask pattern - expands for each rig
+[[subtasks]]
+title = "{{rig}}: Implement {{feature}}"
+description = """
+Implement {{feature}} in the {{rig}} rig.
+
+## Steps
+1. Review existing architecture
+2. Design integration approach
+3. Implement feature
+4. Add tests
+5. Update documentation
+6. Create PR
+
+## Acceptance
+- [ ] Feature implemented
+- [ ] Tests pass
+- [ ] Documentation updated
+- [ ] PR merged
+"""
+type = "task"
+priority = "{{priority}}"
+expand_over = "rigs"  # Creates one subtask per rig

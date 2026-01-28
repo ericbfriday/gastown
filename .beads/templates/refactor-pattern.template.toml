@@ -1,0 +1,116 @@
+# Refactor Pattern Template
+#
+# For refactoring a pattern across multiple files or components.
+# Example: "Replace manual error handling with error wrapper"
+#
+# Usage:
+#   bd create --template refactor-pattern \
+#     --var pattern="manual error handling" \
+#     --var replacement="error wrapper utility" \
+#     --var locations="beads.go,routes.go,catalog.go"
+
+name = "refactor-pattern"
+description = "Refactor a code pattern across multiple locations"
+version = 1
+
+[vars]
+[vars.pattern]
+description = "Pattern to refactor (e.g., 'manual error handling')"
+required = true
+
+[vars.replacement]
+description = "What to replace it with (e.g., 'error wrapper')"
+required = true
+
+[vars.locations]
+description = "Comma-separated list of files/components to update"
+required = true
+
+[vars.rig]
+description = "Target rig for the refactor"
+default = "gastown"
+
+[vars.priority]
+description = "Priority (0-4)"
+default = "3"
+
+[epic]
+title = "Refactor: {{pattern}} → {{replacement}}"
+description = """
+Code quality refactor: Replace {{pattern}} with {{replacement}}
+
+Target locations: {{locations}}
+Rig: {{rig}}
+
+## Context
+This refactor improves code quality and consistency by replacing
+{{pattern}} with {{replacement}} across the codebase.
+
+## Strategy
+1. Design the new pattern
+2. Update each location incrementally
+3. Verify tests pass after each change
+4. Remove old pattern code
+5. Update documentation
+
+## Acceptance
+- [ ] All locations updated
+- [ ] Tests pass
+- [ ] Old pattern fully removed
+- [ ] Documentation updated
+"""
+priority = "{{priority}}"
+type = "epic"
+
+[[subtasks]]
+title = "Design {{replacement}} implementation"
+description = """
+Design how {{replacement}} will work.
+
+## Deliverables
+- [ ] Interface/API design
+- [ ] Migration strategy
+- [ ] Test plan
+"""
+type = "task"
+priority = "{{priority}}"
+
+[[subtasks]]
+title = "Update {{location}}"
+description = """
+Replace {{pattern}} with {{replacement}} in {{location}}.
+
+## Steps
+1. Review current usage of {{pattern}}
+2. Implement {{replacement}}
+3. Update tests
+4. Verify behavior unchanged
+5. Commit changes
+
+## Acceptance
+- [ ] Pattern replaced
+- [ ] Tests pass
+- [ ] No regressions
+"""
+type = "task"
+priority = "{{priority}}"
+expand_over = "locations"
+
+[[subtasks]]
+title = "Remove old {{pattern}} code"
+description = """
+Clean up old {{pattern}} implementation.
+
+## Steps
+1. Verify all usages migrated
+2. Remove old code
+3. Update documentation
+4. Final test pass
+
+## Acceptance
+- [ ] Old code removed
+- [ ] No references remain
+- [ ] Documentation updated
+"""
+type = "task"
+priority = "{{priority}}"

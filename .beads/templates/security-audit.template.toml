@@ -1,0 +1,92 @@
+# Security Audit Template
+#
+# For conducting security audits across components.
+# Example: "Audit authentication in all API endpoints"
+#
+# Usage:
+#   bd create --template security-audit \
+#     --var scope="authentication" \
+#     --var components="API,CLI,daemon"
+
+name = "security-audit"
+description = "Conduct security audit across components"
+version = 1
+
+[vars]
+[vars.scope]
+description = "Security scope (e.g., 'authentication', 'input validation')"
+required = true
+
+[vars.components]
+description = "Comma-separated list of components to audit"
+required = true
+
+[vars.priority]
+description = "Priority (0-4)"
+default = "1"
+
+[epic]
+title = "Security Audit: {{scope}}"
+description = """
+Security audit focusing on {{scope}} across all components.
+
+Components: {{components}}
+
+## Objectives
+1. Identify security vulnerabilities related to {{scope}}
+2. Document findings and severity
+3. Create remediation tasks
+4. Verify fixes
+
+## Methodology
+- Review code for common vulnerabilities
+- Check against OWASP guidelines
+- Test edge cases and attack vectors
+- Validate security controls
+
+## Acceptance
+- [ ] All components audited
+- [ ] Findings documented
+- [ ] Critical issues fixed
+- [ ] Security controls verified
+"""
+priority = "{{priority}}"
+type = "epic"
+
+[[subtasks]]
+title = "Audit {{component}}: {{scope}}"
+description = """
+Security audit of {{scope}} in {{component}}.
+
+## Checklist
+- [ ] Review {{scope}} implementation
+- [ ] Check for common vulnerabilities
+- [ ] Test edge cases
+- [ ] Verify security controls
+- [ ] Document findings
+
+## Deliverables
+- Findings report with severity ratings
+- Remediation recommendations
+- Test cases for vulnerabilities
+"""
+type = "task"
+priority = "{{priority}}"
+expand_over = "components"
+
+[[subtasks]]
+title = "Remediation: Fix critical {{scope}} issues"
+description = """
+Address critical security issues found during {{scope}} audit.
+
+This task will be populated after audit findings are available.
+
+## Process
+1. Review findings from audit tasks
+2. Prioritize by severity
+3. Fix critical issues first
+4. Verify fixes
+5. Update documentation
+"""
+type = "task"
+priority = "0"

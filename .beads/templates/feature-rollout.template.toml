@@ -1,0 +1,156 @@
+# Feature Rollout Template
+#
+# For phased rollout of a feature with design, implementation, and testing.
+# Example: "Add rate limiting to API endpoints"
+#
+# Usage:
+#   bd create --template feature-rollout \
+#     --var feature="rate limiting" \
+#     --var rig="gastown"
+
+name = "feature-rollout"
+description = "Phased feature rollout with design, implementation, testing"
+version = 1
+
+[vars]
+[vars.feature]
+description = "Feature name (e.g., 'rate limiting')"
+required = true
+
+[vars.rig]
+description = "Target rig"
+required = true
+
+[vars.priority]
+description = "Priority (0-4)"
+default = "2"
+
+[epic]
+title = "{{rig}}: {{feature}}"
+description = """
+Feature rollout: {{feature}} in {{rig}} rig
+
+## Phases
+1. Design and specification
+2. Core implementation
+3. Testing and validation
+4. Documentation
+5. Deployment
+
+## Success Criteria
+- [ ] Design approved
+- [ ] Implementation complete
+- [ ] Tests passing
+- [ ] Documentation updated
+- [ ] Feature deployed
+"""
+priority = "{{priority}}"
+type = "epic"
+
+[[subtasks]]
+title = "Design: {{feature}} specification"
+description = """
+Create design specification for {{feature}}.
+
+## Deliverables
+- [ ] Requirements document
+- [ ] Architecture design
+- [ ] API/Interface design
+- [ ] Data model (if applicable)
+- [ ] Security considerations
+- [ ] Performance requirements
+
+## Output
+Design document in rig docs/design/ directory
+"""
+type = "task"
+priority = "{{priority}}"
+
+[[subtasks]]
+title = "Implement: {{feature}} core"
+description = """
+Implement core functionality for {{feature}}.
+
+## Dependencies
+Requires design specification to be complete.
+
+## Steps
+1. Set up project structure
+2. Implement core logic
+3. Add error handling
+4. Write unit tests
+5. Code review
+
+## Acceptance
+- [ ] Core functionality working
+- [ ] Unit tests passing
+- [ ] Code reviewed
+"""
+type = "task"
+priority = "{{priority}}"
+
+[[subtasks]]
+title = "Test: {{feature}} validation"
+description = """
+Comprehensive testing for {{feature}}.
+
+## Test Coverage
+- [ ] Unit tests
+- [ ] Integration tests
+- [ ] Edge cases
+- [ ] Error conditions
+- [ ] Performance tests
+- [ ] Security tests (if applicable)
+
+## Acceptance
+- [ ] All tests passing
+- [ ] Coverage >= 80%
+- [ ] No critical bugs
+"""
+type = "task"
+priority = "{{priority}}"
+
+[[subtasks]]
+title = "Document: {{feature}}"
+description = """
+Documentation for {{feature}}.
+
+## Deliverables
+- [ ] User documentation
+- [ ] API reference
+- [ ] Examples
+- [ ] Migration guide (if applicable)
+- [ ] Troubleshooting guide
+
+## Locations
+- README updates
+- docs/ directory
+- Code comments/docstrings
+"""
+type = "task"
+priority = "{{priority}}"
+
+[[subtasks]]
+title = "Deploy: {{feature}}"
+description = """
+Deploy {{feature}} to production.
+
+## Pre-deployment
+- [ ] All tests passing
+- [ ] Documentation complete
+- [ ] Code reviewed and merged
+
+## Deployment Steps
+1. Create release branch
+2. Update version
+3. Run final tests
+4. Merge to main
+5. Monitor for issues
+
+## Post-deployment
+- [ ] Feature verified in production
+- [ ] Monitoring configured
+- [ ] No errors reported
+"""
+type = "task"
+priority = "{{priority}}"
