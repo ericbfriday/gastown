@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "rigs": {
+    "aardwolf_snd": {
+      "git_url": "git@github.com:ericbfriday/mudlet-snd-full.git",
+      "added_at": "2026-01-21T20:35:23.809553-06:00",
+      "beads": {
+        "repo": "",
+        "prefix": "as"
+      }
+    },
+    "duneagent": {
+      "git_url": "git@github.com:ericbfriday/duneagent.git",
+      "added_at": "2026-01-21T20:22:15.356817-06:00",
+      "beads": {
+        "repo": "",
+        "prefix": "du"
+      }
+    }
+  }
+}
