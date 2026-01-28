@@ -1,0 +1,15 @@
+{"type":"message_start","message":{"id":"msg_01ABC123","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4.5","stop_reason":null},"timestamp":"2026-01-27T10:00:00Z"}
+{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""},"timestamp":"2026-01-27T10:00:00Z"}
+{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Let me read the file to understand the issue."},"timestamp":"2026-01-27T10:00:01Z"}
+{"type":"tool_use","id":"tool_01","name":"Read","input":{"file_path":"/Users/test/file.txt"},"timestamp":"2026-01-27T10:00:02Z"}
+{"type":"tool_result","tool_use_id":"tool_01","content":"File contents here","is_error":false,"timestamp":"2026-01-27T10:00:03Z"}
+{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" Now I'll analyze the issue."},"timestamp":"2026-01-27T10:00:04Z"}
+{"type":"tool_use","id":"tool_02","name":"Bash","input":{"command":"grep -r 'pattern' ."},"timestamp":"2026-01-27T10:00:05Z"}
+{"type":"tool_result","tool_use_id":"tool_02","content":"pattern found in file.txt:42","is_error":false,"timestamp":"2026-01-27T10:00:06Z"}
+{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" I'll fix the issue now."},"timestamp":"2026-01-27T10:00:07Z"}
+{"type":"tool_use","id":"tool_03","name":"Edit","input":{"file_path":"/Users/test/file.txt","old_string":"old","new_string":"new"},"timestamp":"2026-01-27T10:00:08Z"}
+{"type":"tool_result","tool_use_id":"tool_03","content":"Edit completed","is_error":false,"timestamp":"2026-01-27T10:00:09Z"}
+{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" Issue resolved successfully."},"timestamp":"2026-01-27T10:00:10Z"}
+{"type":"content_block_stop","index":0,"timestamp":"2026-01-27T10:00:11Z"}
+{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":250,"output_tokens":120},"timestamp":"2026-01-27T10:00:12Z"}
+{"type":"message_stop","timestamp":"2026-01-27T10:00:13Z"}
