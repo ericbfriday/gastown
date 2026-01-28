@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/git"
@@ -18,18 +19,22 @@ import (
 	"github.com/steveyegge/gastown/internal/suggest"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/townlog"
+	"github.com/steveyegge/gastown/internal/tui/session"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // Session command flags
 var (
-	sessionIssue     string
-	sessionForce     bool
-	sessionLines     int
-	sessionMessage   string
-	sessionFile      string
-	sessionRigFilter string
-	sessionListJSON  bool
+	sessionIssue      string
+	sessionForce      bool
+	sessionLines      int
+	sessionMessage    string
+	sessionFile       string
+	sessionRigFilter  string
+	sessionListJSON   bool
+	cycleNoTUI        bool
+	cycleIssue        string
+	cycleAutoAttach   bool
 )
 
 var sessionCmd = &cobra.Command{
@@ -197,6 +202,7 @@ func init() {
 	sessionCmd.AddCommand(sessionRestartCmd)
 	sessionCmd.AddCommand(sessionStatusCmd)
 	sessionCmd.AddCommand(sessionCheckCmd)
+	sessionCmd.AddCommand(sessionCycleCmd)
 
 	rootCmd.AddCommand(sessionCmd)
 }
@@ -683,5 +689,184 @@ func runSessionCheck(cmd *cobra.Command, args []string) error {
 			style.Dim.Render("Tip:"))
 	}
 
+	return nil
+}
+
+var sessionCycleCmd = &cobra.Command{
+	Use:   "cycle <rig>/<polecat>",
+	Short: "Cycle a polecat session with smooth transitions",
+	Long: `Restart a polecat session with a smooth TUI interface.
+
+This command provides visual feedback during session transitions,
+including progress indicators, context preservation, and lifecycle hooks.
+
+The TUI shows:
+- Current transition phase (pre-shutdown, shutdown, startup, etc.)
+- Progress bar with elapsed time
+- Preserved context between sessions
+- Hook execution status
+- Error messages with recovery options
+
+Examples:
+  gt session cycle wyvern/Toast          # Restart with TUI
+  gt session cycle wyvern/Toast --no-tui # Restart without TUI
+  gt session cycle wyvern/Toast --issue gt-abc123  # Cycle to specific issue`,
+	Args: cobra.ExactArgs(1),
+	RunE: runSessionCycle,
+}
+
+func init() {
+	sessionCycleCmd.Flags().BoolVar(&cycleNoTUI, "no-tui", false, "Disable TUI and use simple output")
+	sessionCycleCmd.Flags().StringVar(&cycleIssue, "issue", "", "Issue ID for new session")
+	sessionCycleCmd.Flags().BoolVar(&cycleAutoAttach, "attach", false, "Attach to session after cycling")
+}
+
+func runSessionCycle(cmd *cobra.Command, args []string) error {
+	rigName, polecatName, err := parseAddress(args[0])
+	if err != nil {
+		return err
+	}
+
+	polecatMgr, r, err := getSessionManager(rigName)
+	if err != nil {
+		return err
+	}
+
+	// Check if session exists
+	running, err := polecatMgr.IsRunning(polecatName)
+	if err != nil {
+		return fmt.Errorf("checking session: %w", err)
+	}
+
+	if !running {
+		// Session not running - start it instead
+		if cycleNoTUI {
+			return runSessionStartSimple(polecatMgr, rigName, polecatName, cycleIssue)
+		}
+		return runSessionStartTUI(polecatMgr, r, rigName, polecatName, cycleIssue, cycleAutoAttach)
+	}
+
+	// Session is running - cycle it
+	if cycleNoTUI {
+		return runSessionCycleSimple(polecatMgr, rigName, polecatName, cycleIssue)
+	}
+	return runSessionCycleTUI(polecatMgr, r, rigName, polecatName, cycleIssue, cycleAutoAttach)
+}
+
+// runSessionCycleTUI runs the cycle operation with TUI.
+func runSessionCycleTUI(polecatMgr *polecat.SessionManager, r *rig.Rig, rigName, polecatName, issueID string, autoAttach bool) error {
+	// Create TUI model
+	m := session.New(polecatMgr, r, rigName, polecatName)
+
+	// Set next issue if provided
+	if issueID != "" {
+		m.SetNextIssue(issueID)
+	}
+
+	// Start the TUI
+	p := tea.NewProgram(m, tea.WithAltScreen())
+
+	// Start the cycle
+	go func() {
+		p.Send(session.StartCycleMsg{})
+	}()
+
+	finalModel, err := p.Run()
+	if err != nil {
+		return fmt.Errorf("running TUI: %w", err)
+	}
+
+	// Check if transition succeeded
+	if sessionModel, ok := finalModel.(session.Model); ok {
+		if sessionModel.HasError() {
+			return fmt.Errorf("transition failed: %w", sessionModel.GetError())
+		}
+	}
+
+	// Auto-attach if requested
+	if autoAttach {
+		fmt.Println("\nAttaching to session...")
+		return polecatMgr.Attach(polecatName)
+	}
+
+	fmt.Printf("\n✓ Session cycled successfully. Attach with: gt session at %s/%s\n", rigName, polecatName)
+	return nil
+}
+
+// runSessionCycleSimple runs the cycle operation without TUI.
+func runSessionCycleSimple(polecatMgr *polecat.SessionManager, rigName, polecatName, issueID string) error {
+	fmt.Printf("Cycling session for %s/%s...\n", rigName, polecatName)
+
+	// Stop current session
+	fmt.Println("  Stopping current session...")
+	if err := polecatMgr.Stop(polecatName, false); err != nil {
+		return fmt.Errorf("stopping session: %w", err)
+	}
+
+	// Start new session
+	fmt.Println("  Starting new session...")
+	opts := polecat.SessionStartOptions{
+		Issue: issueID,
+	}
+	if err := polecatMgr.Start(polecatName, opts); err != nil {
+		return fmt.Errorf("starting session: %w", err)
+	}
+
+	fmt.Printf("✓ Session cycled. Attach with: gt session at %s/%s\n", rigName, polecatName)
+	return nil
+}
+
+// runSessionStartTUI runs the start operation with TUI.
+func runSessionStartTUI(polecatMgr *polecat.SessionManager, r *rig.Rig, rigName, polecatName, issueID string, autoAttach bool) error {
+	// Create TUI model
+	m := session.New(polecatMgr, r, rigName, polecatName)
+
+	// Set issue if provided
+	if issueID != "" {
+		m.SetNextIssue(issueID)
+	}
+
+	// Start the TUI
+	p := tea.NewProgram(m, tea.WithAltScreen())
+
+	// Start the session
+	go func() {
+		p.Send(session.StartSessionMsg{IssueID: issueID})
+	}()
+
+	finalModel, err := p.Run()
+	if err != nil {
+		return fmt.Errorf("running TUI: %w", err)
+	}
+
+	// Check if transition succeeded
+	if sessionModel, ok := finalModel.(session.Model); ok {
+		if sessionModel.HasError() {
+			return fmt.Errorf("transition failed: %w", sessionModel.GetError())
+		}
+	}
+
+	// Auto-attach if requested
+	if autoAttach {
+		fmt.Println("\nAttaching to session...")
+		return polecatMgr.Attach(polecatName)
+	}
+
+	fmt.Printf("\n✓ Session started. Attach with: gt session at %s/%s\n", rigName, polecatName)
+	return nil
+}
+
+// runSessionStartSimple runs the start operation without TUI.
+func runSessionStartSimple(polecatMgr *polecat.SessionManager, rigName, polecatName, issueID string) error {
+	fmt.Printf("Starting session for %s/%s...\n", rigName, polecatName)
+
+	opts := polecat.SessionStartOptions{
+		Issue: issueID,
+	}
+	if err := polecatMgr.Start(polecatName, opts); err != nil {
+		return fmt.Errorf("starting session: %w", err)
+	}
+
+	fmt.Printf("✓ Session started. Attach with: gt session at %s/%s\n", rigName, polecatName)
 	return nil
 }
