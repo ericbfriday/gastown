@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 )
 
 // registerBuiltinHooks registers all built-in hook functions with the runner.
@@ -103,13 +104,13 @@ func checkUncommitted(ctx *HookContext) (*HookResult, error) {
 func findGitDir(startPath string) string {
 	dir := startPath
 	for {
-		gitPath := fmt.Sprintf("%s/.git", dir)
+		gitPath := filepath.Join(dir, ".git")
 		if stat, err := os.Stat(gitPath); err == nil && stat.IsDir() {
 			return gitPath
 		}
 
 		// Move up one directory
-		parent := fmt.Sprintf("%s/..", dir)
+		parent := filepath.Dir(dir)
 		if parent == dir {
 			break // Reached root
 		}

@@ -3,7 +3,6 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/workspace/cleanup"
@@ -113,16 +112,4 @@ func showConfig() error {
 
 	fmt.Println(string(data))
 	return nil
-}
-
-// writeConfigTemplate writes a configuration template to stdout or file.
-func writeConfigTemplate(output *os.File) error {
-	configs := cleanup.DefaultConfigs()
-	data, err := json.MarshalIndent(configs, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	_, err = output.Write(data)
-	return err
 }

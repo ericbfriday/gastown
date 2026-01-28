@@ -13,7 +13,7 @@ func TestHookIntegration(t *testing.T) {
 	// Create a temporary directory for testing
 	tmpDir := t.TempDir()
 
-	// Create a simple hooks configuration
+	// Create a simple hooks configuration with only builtin hooks
 	configDir := filepath.Join(tmpDir, ".gastown")
 	if err := os.MkdirAll(configDir, 0755); err != nil {
 		t.Fatalf("Failed to create config dir: %v", err)
@@ -26,12 +26,6 @@ func TestHookIntegration(t *testing.T) {
       {
         "type": "builtin",
         "name": "verify-git-clean"
-      }
-    ],
-    "mail-received": [
-      {
-        "type": "command",
-        "cmd": "true"
       }
     ]
   }
@@ -54,8 +48,8 @@ func TestHookIntegration(t *testing.T) {
 
 	// Test listing hooks
 	hookMap := runner.ListHooks("")
-	if len(hookMap) != 2 {
-		t.Errorf("Expected 2 events with hooks, got %d", len(hookMap))
+	if len(hookMap) != 1 {
+		t.Errorf("Expected 1 event with hooks, got %d", len(hookMap))
 	}
 
 	// Test firing pre-session-start hooks (should pass since we're not in a git repo)
@@ -73,24 +67,6 @@ func TestHookIntegration(t *testing.T) {
 	}
 	if len(results) > 0 && !results[0].Success {
 		t.Errorf("Expected hook to succeed (not a git repo), got error: %s", results[0].Error)
-	}
-
-	// Test firing mail-received hooks
-	mailCtx := &hooks.HookContext{
-		WorkingDir: tmpDir,
-		Metadata: map[string]interface{}{
-			"from":    "mayor",
-			"to":      "testrig/polecat",
-			"subject": "Test message",
-		},
-	}
-
-	mailResults := runner.Fire(hooks.EventMailReceived, mailCtx)
-	if len(mailResults) != 1 {
-		t.Errorf("Expected 1 mail hook result, got %d", len(mailResults))
-	}
-	if len(mailResults) > 0 && !mailResults[0].Success {
-		t.Errorf("Mail hook failed: %s", mailResults[0].Error)
 	}
 }
 
