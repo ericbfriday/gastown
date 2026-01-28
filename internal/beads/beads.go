@@ -796,3 +796,35 @@ func ProvisionPrimeMDForWorktree(worktreePath string) error {
 	// Provision PRIME.md in the target directory
 	return ProvisionPrimeMD(beadsDir)
 }
+
+// Show retrieves a single issue by ID using the current working directory.
+// This is a package-level convenience wrapper around Beads.Show().
+func Show(id string) (*Issue, error) {
+	workDir, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("getting working directory: %w", err)
+	}
+	b := New(workDir)
+	return b.Show(id)
+}
+
+// List retrieves issues matching the given filters using the current working directory.
+// This is a package-level convenience wrapper around Beads.List().
+func List(opts ListOptions) ([]Issue, error) {
+	workDir, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("getting working directory: %w", err)
+	}
+	b := New(workDir)
+	issues, err := b.List(opts)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert []*Issue to []Issue to match expected return type
+	result := make([]Issue, len(issues))
+	for i, issue := range issues {
+		result[i] = *issue
+	}
+	return result, nil
+}

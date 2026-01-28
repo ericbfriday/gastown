@@ -6,7 +6,6 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/planoracle/analyzer"
 	"github.com/steveyegge/gastown/internal/planoracle/sources"
 )
@@ -73,7 +72,7 @@ func runDecompose(beadsSource *sources.BeadsSource, issueID string, opts *Decomp
 	if err != nil {
 		// Non-fatal: continue with empty metrics
 		fmt.Fprintf(os.Stderr, "Warning: Could not collect historical metrics: %v\n", err)
-		metrics = sources.NewMetricsCollector(beadsSource).CollectMetrics()
+		metrics, _ = sources.NewMetricsCollector(beadsSource).CollectMetrics()
 	}
 
 	// Create decomposer
