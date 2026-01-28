@@ -9,6 +9,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/hooks"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -718,6 +719,9 @@ func (r *Router) sendToSingle(msg *Message) error {
 		_ = r.notifyRecipient(msg)
 	}
 
+	// Fire mail-received hook (best-effort)
+	_ = r.fireMailReceivedHook(msg)
+
 	return nil
 }
 
@@ -1152,4 +1156,49 @@ func addressToSessionID(address string) string {
 		return ""
 	}
 	return ids[0]
+}
+
+// fireMailReceivedHook fires the mail-received lifecycle hook (best-effort).
+func (r *Router) fireMailReceivedHook(msg *Message) error {
+	if r.townRoot == "" {
+		return nil // No town root, can't fire hooks
+	}
+
+	runner, err := hooks.NewHookRunner(r.townRoot)
+	if err != nil {
+		return nil // No hooks configured, ignore
+	}
+
+	ctx := &hooks.HookContext{
+		WorkingDir: r.townRoot,
+		Metadata: map[string]interface{}{
+			"from":    msg.From,
+			"to":      msg.To,
+			"subject": msg.Subject,
+		},
+	}
+
+	// Add optional metadata
+	if msg.ThreadID != "" {
+		ctx.Metadata["thread_id"] = msg.ThreadID
+	}
+	if msg.ReplyTo != "" {
+		ctx.Metadata["reply_to"] = msg.ReplyTo
+	}
+	if len(msg.CC) > 0 {
+		ctx.Metadata["cc"] = msg.CC
+	}
+	if msg.Priority != "" {
+		ctx.Metadata["priority"] = msg.Priority
+	}
+
+	results := runner.Fire(hooks.EventMailReceived, ctx)
+	for _, result := range results {
+		if !result.Success {
+			// Log but don't fail mail delivery
+			_ = result
+		}
+	}
+
+	return nil
 }

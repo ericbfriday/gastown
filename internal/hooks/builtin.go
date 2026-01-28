@@ -7,6 +7,7 @@ import (
 )
 
 // registerBuiltinHooks registers all built-in hook functions with the runner.
+// Note: Workspace cleanup hooks are registered separately via cleanup.RegisterCleanupHooks()
 func registerBuiltinHooks(r *HookRunner) {
 	r.RegisterBuiltin("pre-shutdown-checks", preShutdownChecks)
 	r.RegisterBuiltin("verify-git-clean", verifyGitClean)

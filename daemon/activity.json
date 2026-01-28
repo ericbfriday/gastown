@@ -1,1 +1,1 @@
-{"last_command":"bd list --type message --label cc:mayor --status open --json","actor":"mayor","timestamp":"2026-01-22T03:14:46Z"}
+{"last_command":"bd show du-wisp-y03","actor":"duneagent/witness","timestamp":"2026-01-28T10:59:28Z"}

@@ -6,6 +6,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
@@ -23,6 +24,7 @@ var (
 	pluginRunDryRun   bool
 	pluginHistoryJSON bool
 	pluginHistoryLimit int
+	pluginStatusJSON  bool
 )
 
 var pluginCmd = &cobra.Command{
@@ -82,6 +84,21 @@ Examples:
 	RunE: runPluginShow,
 }
 
+var pluginStatusCmd = &cobra.Command{
+	Use:   "status <name>",
+	Short: "Show plugin runtime status",
+	Long: `Show runtime status and health information for a plugin.
+
+Displays execution statistics, last run details, gate status, and health checks.
+This command provides a runtime view while 'show' provides configuration.
+
+Examples:
+  gt plugin status rebuild-gt
+  gt plugin status rebuild-gt --json`,
+	Args: cobra.ExactArgs(1),
+	RunE: runPluginStatus,
+}
+
 var pluginRunCmd = &cobra.Command{
 	Use:   "run <name>",
 	Short: "Manually trigger plugin execution",
@@ -120,6 +137,9 @@ func init() {
 	// Show subcommand flags
 	pluginShowCmd.Flags().BoolVar(&pluginShowJSON, "json", false, "Output as JSON")
 
+	// Status subcommand flags
+	pluginStatusCmd.Flags().BoolVar(&pluginStatusJSON, "json", false, "Output as JSON")
+
 	// Run subcommand flags
 	pluginRunCmd.Flags().BoolVar(&pluginRunForce, "force", false, "Bypass gate check")
 	pluginRunCmd.Flags().BoolVar(&pluginRunDryRun, "dry-run", false, "Show what would happen without executing")
@@ -131,6 +151,7 @@ func init() {
 	// Add subcommands
 	pluginCmd.AddCommand(pluginListCmd)
 	pluginCmd.AddCommand(pluginShowCmd)
+	pluginCmd.AddCommand(pluginStatusCmd)
 	pluginCmd.AddCommand(pluginRunCmd)
 	pluginCmd.AddCommand(pluginHistoryCmd)
 
@@ -504,4 +525,217 @@ func runPluginHistory(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func runPluginStatus(cmd *cobra.Command, args []string) error {
+	name := args[0]
+
+	scanner, townRoot, err := getPluginScanner()
+	if err != nil {
+		return err
+	}
+
+	p, err := scanner.GetPlugin(name)
+	if err != nil {
+		return err
+	}
+
+	// Get runtime information
+	recorder := plugin.NewRecorder(townRoot)
+	
+	// Get last run
+	lastRun, err := recorder.GetLastRun(name)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to get last run: %v\n", err)
+	}
+
+	// Get recent runs for statistics (last 50 runs)
+	recentRuns, err := recorder.GetRunsSince(name, "")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to get run history: %v\n", err)
+	}
+	if recentRuns == nil {
+		recentRuns = []*plugin.PluginRunBead{}
+	}
+
+	// Calculate statistics
+	var successCount, failureCount, skippedCount int
+	for _, run := range recentRuns {
+		switch run.Result {
+		case plugin.ResultSuccess:
+			successCount++
+		case plugin.ResultFailure:
+			failureCount++
+		case plugin.ResultSkipped:
+			skippedCount++
+		}
+	}
+
+	// Check gate status for cooldown gates
+	gateOpen := true
+	gateReason := ""
+	var nextRunTime time.Time
+	if p.Gate != nil && p.Gate.Type == plugin.GateCooldown {
+		duration := p.Gate.Duration
+		if duration == "" {
+			duration = "1h"
+		}
+		count, err := recorder.CountRunsSince(p.Name, duration)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: checking gate status: %v\n", err)
+		} else if count > 0 {
+			gateOpen = false
+			gateReason = fmt.Sprintf("ran %d time(s) within %s cooldown", count, duration)
+			if lastRun != nil {
+				// Estimate next run time based on cooldown
+				parsedDuration, parseErr := time.ParseDuration(duration)
+				if parseErr == nil {
+					nextRunTime = lastRun.CreatedAt.Add(parsedDuration)
+				}
+			}
+		}
+	}
+
+	if pluginStatusJSON {
+		return outputPluginStatusJSON(p, lastRun, recentRuns, gateOpen, gateReason, nextRunTime, successCount, failureCount, skippedCount)
+	}
+
+	return outputPluginStatusText(p, lastRun, recentRuns, gateOpen, gateReason, nextRunTime, successCount, failureCount, skippedCount)
+}
+
+func outputPluginStatusJSON(p *plugin.Plugin, lastRun *plugin.PluginRunBead, recentRuns []*plugin.PluginRunBead, gateOpen bool, gateReason string, nextRunTime time.Time, successCount, failureCount, skippedCount int) error {
+	status := map[string]interface{}{
+		"name":        p.Name,
+		"description": p.Description,
+		"location":    p.Location,
+		"rig_name":    p.RigName,
+		"path":        p.Path,
+		"gate": map[string]interface{}{
+			"type":   p.Gate.Type,
+			"open":   gateOpen,
+			"reason": gateReason,
+		},
+		"statistics": map[string]interface{}{
+			"total_runs": len(recentRuns),
+			"success":    successCount,
+			"failure":    failureCount,
+			"skipped":    skippedCount,
+		},
+	}
+
+	if lastRun != nil {
+		status["last_run"] = map[string]interface{}{
+			"id":         lastRun.ID,
+			"created_at": lastRun.CreatedAt,
+			"result":     lastRun.Result,
+		}
+	}
+
+	if !nextRunTime.IsZero() {
+		status["next_run_estimate"] = nextRunTime
+	}
+
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(status)
+}
+
+func outputPluginStatusText(p *plugin.Plugin, lastRun *plugin.PluginRunBead, recentRuns []*plugin.PluginRunBead, gateOpen bool, gateReason string, nextRunTime time.Time, successCount, failureCount, skippedCount int) error {
+	fmt.Printf("%s %s\n", style.Bold.Render("Plugin:"), p.Name)
+	if p.Description != "" {
+		fmt.Printf("%s %s\n", style.Bold.Render("Description:"), p.Description)
+	}
+	
+	// Location
+	locStr := string(p.Location)
+	if p.RigName != "" {
+		locStr = fmt.Sprintf("%s (%s)", p.Location, p.RigName)
+	}
+	fmt.Printf("%s %s\n", style.Bold.Render("Location:"), locStr)
+	fmt.Printf("%s %s\n", style.Bold.Render("Path:"), p.Path)
+
+	// Gate status
+	fmt.Println()
+	fmt.Printf("%s\n", style.Bold.Render("Gate Status:"))
+	if p.Gate != nil {
+		fmt.Printf("  Type: %s\n", p.Gate.Type)
+		if gateOpen {
+			fmt.Printf("  Status: %s\n", style.Success.Render("OPEN"))
+		} else {
+			fmt.Printf("  Status: %s\n", style.Warning.Render("CLOSED"))
+			if gateReason != "" {
+				fmt.Printf("  Reason: %s\n", gateReason)
+			}
+		}
+		if !nextRunTime.IsZero() {
+			fmt.Printf("  Next run estimate: %s\n", nextRunTime.Format("2006-01-02 15:04:05"))
+		}
+	} else {
+		fmt.Printf("  Type: manual\n")
+		fmt.Printf("  Status: %s\n", style.Dim.Render("N/A (manual trigger only)"))
+	}
+
+	// Last run
+	fmt.Println()
+	fmt.Printf("%s\n", style.Bold.Render("Last Run:"))
+	if lastRun != nil {
+		resultStyle := style.Success
+		if lastRun.Result == plugin.ResultFailure {
+			resultStyle = style.Error
+		} else if lastRun.Result == plugin.ResultSkipped {
+			resultStyle = style.Dim
+		}
+		
+		fmt.Printf("  Time: %s\n", lastRun.CreatedAt.Format("2006-01-02 15:04:05"))
+		fmt.Printf("  Result: %s\n", resultStyle.Render(string(lastRun.Result)))
+		fmt.Printf("  ID: %s\n", style.Dim.Render(lastRun.ID))
+		
+		// Time since last run
+		timeSince := time.Since(lastRun.CreatedAt)
+		fmt.Printf("  Age: %s\n", formatPluginDuration(timeSince))
+	} else {
+		fmt.Printf("  %s\n", style.Dim.Render("Never executed"))
+	}
+
+	// Statistics
+	fmt.Println()
+	fmt.Printf("%s\n", style.Bold.Render("Execution Statistics:"))
+	fmt.Printf("  Total runs: %d\n", len(recentRuns))
+	if len(recentRuns) > 0 {
+		fmt.Printf("  Success: %s\n", style.Success.Render(fmt.Sprintf("%d", successCount)))
+		if failureCount > 0 {
+			fmt.Printf("  Failure: %s\n", style.Error.Render(fmt.Sprintf("%d", failureCount)))
+		} else {
+			fmt.Printf("  Failure: %d\n", failureCount)
+		}
+		if skippedCount > 0 {
+			fmt.Printf("  Skipped: %d\n", skippedCount)
+		}
+		
+		// Calculate success rate
+		if len(recentRuns) > 0 {
+			successRate := float64(successCount) / float64(len(recentRuns)) * 100
+			fmt.Printf("  Success rate: %.1f%%\n", successRate)
+		}
+	}
+
+	return nil
+}
+
+// formatPluginDuration formats a duration in a human-readable way for plugin status
+func formatPluginDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%d seconds ago", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%d minutes ago", int(d.Minutes()))
+	}
+	if d < 24*time.Hour {
+		return fmt.Sprintf("%d hours ago", int(d.Hours()))
+	}
+	days := int(d.Hours() / 24)
+	if days == 1 {
+		return "1 day ago"
+	}
+	return fmt.Sprintf("%d days ago", days)
 }

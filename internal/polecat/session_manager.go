@@ -13,6 +13,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/hooks"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
@@ -163,6 +164,12 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 		workDir = m.clonePath(polecat)
 	}
 
+	// Fire pre-session-start hooks (can block session startup)
+	townRoot := filepath.Dir(m.rig.Path)
+	if err := m.firePreSessionStartHooks(townRoot, polecat, workDir, opts.Issue); err != nil {
+		return fmt.Errorf("pre-session-start hook blocked: %w", err)
+	}
+
 	// Validate issue exists and isn't tombstoned BEFORE creating session.
 	// This prevents CPU spin loops from agents retrying work on invalid issues.
 	if opts.Issue != "" {
@@ -207,7 +214,6 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 
 	// Set environment (non-fatal: session works without these)
 	// Use centralized AgentEnv for consistency across all role startup paths
-	townRoot := filepath.Dir(m.rig.Path)
 	envVars := config.AgentEnv(config.AgentEnvConfig{
 		Role:             "polecat",
 		Rig:              m.rig.Name,
@@ -256,6 +262,9 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 		return fmt.Errorf("session %s died during startup (agent command may have failed)", sessionID)
 	}
 
+	// Fire post-session-start hooks (best-effort, don't fail session startup)
+	_ = m.firePostSessionStartHooks(townRoot, polecat, workDir, opts.Issue)
+
 	return nil
 }
 
@@ -271,6 +280,15 @@ func (m *SessionManager) Stop(polecat string, force bool) error {
 		return ErrSessionNotFound
 	}
 
+	// Fire pre-shutdown hooks (can block shutdown)
+	townRoot := filepath.Dir(m.rig.Path)
+	workDir := m.clonePath(polecat)
+	if !force {
+		if err := m.firePreShutdownHooks(townRoot, polecat, workDir); err != nil {
+			return fmt.Errorf("pre-shutdown hook blocked: %w", err)
+		}
+	}
+
 	// Try graceful shutdown first
 	if !force {
 		_ = m.tmux.SendKeysRaw(sessionID, "C-c")
@@ -282,6 +300,9 @@ func (m *SessionManager) Stop(polecat string, force bool) error {
 	if err := m.tmux.KillSessionWithProcesses(sessionID); err != nil {
 		return fmt.Errorf("killing session: %w", err)
 	}
+
+	// Fire post-shutdown hooks (best-effort)
+	_ = m.firePostShutdownHooks(townRoot, polecat, workDir)
 
 	return nil
 }
@@ -487,5 +508,126 @@ func (m *SessionManager) hookIssue(issueID, agentID, workDir string) error {
 		return fmt.Errorf("bd update failed: %w", err)
 	}
 	fmt.Printf("✓ Hooked issue %s to %s\n", issueID, agentID)
+	return nil
+}
+
+// firePreSessionStartHooks fires pre-session-start hooks and checks if any block startup.
+func (m *SessionManager) firePreSessionStartHooks(townRoot, polecat, workDir, issueID string) error {
+	runner, err := hooks.NewHookRunner(townRoot)
+	if err != nil {
+		// No hooks configured or error loading - don't block startup
+		debugSession("NewHookRunner", err)
+		return nil
+	}
+
+	ctx := &hooks.HookContext{
+		WorkingDir: workDir,
+		Metadata: map[string]interface{}{
+			"polecat":    polecat,
+			"rig":        m.rig.Name,
+			"session_id": m.SessionName(polecat),
+		},
+	}
+	if issueID != "" {
+		ctx.Metadata["issue_id"] = issueID
+	}
+
+	results := runner.Fire(hooks.EventPreSessionStart, ctx)
+	for _, result := range results {
+		if result.Block {
+			return fmt.Errorf("hook blocked startup: %s", result.Message)
+		}
+		if !result.Success {
+			debugSession("pre-session-start hook", fmt.Errorf("%s", result.Error))
+		}
+	}
+
+	return nil
+}
+
+// firePostSessionStartHooks fires post-session-start hooks (best-effort).
+func (m *SessionManager) firePostSessionStartHooks(townRoot, polecat, workDir, issueID string) error {
+	runner, err := hooks.NewHookRunner(townRoot)
+	if err != nil {
+		debugSession("NewHookRunner", err)
+		return nil
+	}
+
+	ctx := &hooks.HookContext{
+		WorkingDir: workDir,
+		Metadata: map[string]interface{}{
+			"polecat":    polecat,
+			"rig":        m.rig.Name,
+			"session_id": m.SessionName(polecat),
+		},
+	}
+	if issueID != "" {
+		ctx.Metadata["issue_id"] = issueID
+	}
+
+	results := runner.Fire(hooks.EventPostSessionStart, ctx)
+	for _, result := range results {
+		if !result.Success {
+			debugSession("post-session-start hook", fmt.Errorf("%s", result.Error))
+		}
+	}
+
+	return nil
+}
+
+// firePreShutdownHooks fires pre-shutdown hooks and checks if any block shutdown.
+func (m *SessionManager) firePreShutdownHooks(townRoot, polecat, workDir string) error {
+	runner, err := hooks.NewHookRunner(townRoot)
+	if err != nil {
+		debugSession("NewHookRunner", err)
+		return nil
+	}
+
+	ctx := &hooks.HookContext{
+		WorkingDir: workDir,
+		Metadata: map[string]interface{}{
+			"polecat":    polecat,
+			"rig":        m.rig.Name,
+			"session_id": m.SessionName(polecat),
+		},
+	}
+
+	results := runner.Fire(hooks.EventPreShutdown, ctx)
+	for _, result := range results {
+		if result.Block {
+			return fmt.Errorf("hook blocked shutdown: %s", result.Message)
+		}
+		if !result.Success {
+			debugSession("pre-shutdown hook", fmt.Errorf("%s", result.Error))
+		}
+	}
+
+	return nil
+}
+
+// firePostShutdownHooks fires post-shutdown hooks (best-effort).
+func (m *SessionManager) firePostShutdownHooks(townRoot, polecat, workDir string) error {
+	runner, err := hooks.NewHookRunner(townRoot)
+	if err != nil {
+		debugSession("NewHookRunner", err)
+		return nil
+	}
+
+	ctx := &hooks.HookContext{
+		WorkingDir: workDir,
+		Metadata: map[string]interface{}{
+			"polecat":    polecat,
+			"rig":        m.rig.Name,
+			"session_id": m.SessionName(polecat),
+		},
+	}
+
+	results := runner.Fire(hooks.EventPostShutdown, ctx)
+	for _, result := range results {
+		if !result.Success {
+			debugSession("post-shutdown hook", fmt.Errorf("%s", result.Error))
+		}
+	}
+
 	return nil
 }
