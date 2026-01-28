@@ -15,14 +15,23 @@ var (
 	// Pattern for metadata in frontmatter
 	metadataRe = regexp.MustCompile(`^\*\*([^:]+):\*\*\s+(.+)$`)
 
+	// Pattern for YAML frontmatter key-value pairs
+	yamlMetadataRe = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_ ]*?):\s+(.+)$`)
+
 	// Pattern for task lists: "1. Task description"
 	taskListRe = regexp.MustCompile(`^(\d+)\.\s+(.+)$`)
 
-	// Pattern for checkboxes: "- ✅ Deliverable" or "- [ ] Item"
-	checkboxRe = regexp.MustCompile(`^[-*]\s+(?:✅|☐|\[[ x]\])\s+(.+)$`)
+	// Pattern for checkboxes: "- ✅ Deliverable" or "- [ ] Item" or "- [x] Item"
+	checkboxRe = regexp.MustCompile(`^[-*]\s+\[([x ])\]\s+(.+)$`)
+
+	// Pattern for emoji checkboxes: "- ✅ Item" or "- ☐ Item"
+	emojiCheckboxRe = regexp.MustCompile(`^[-*]\s+(✅|☐)\s+(.+)$`)
 
 	// Pattern for section markers: "**Tasks:**", "**Deliverables:**"
 	sectionMarkerRe = regexp.MustCompile(`^\*\*([^:]+):\*\*\s*$`)
+
+	// Pattern for YAML frontmatter delimiter
+	yamlDelimiterRe = regexp.MustCompile(`^---\s*$`)
 )
 
 // ParsePlanDocument parses a markdown planning document.
@@ -42,11 +51,47 @@ func ParsePlanDocument(filePath string) (*PlanDocument, error) {
 	var currentSection *Section
 	var sectionStack []*Section
 	var inMetadata bool
+	var inYAMLFrontmatter bool
 	var lineNum int
 
 	for scanner.Scan() {
 		lineNum++
 		line := scanner.Text()
+
+		// Detect YAML frontmatter delimiter
+		if yamlDelimiterRe.MatchString(line) {
+			if lineNum == 1 {
+				// Start of YAML frontmatter
+				inYAMLFrontmatter = true
+				continue
+			} else if inYAMLFrontmatter {
+				// End of YAML frontmatter
+				inYAMLFrontmatter = false
+				continue
+			}
+		}
+
+		// Parse YAML frontmatter
+		if inYAMLFrontmatter {
+			if matches := yamlMetadataRe.FindStringSubmatch(line); matches != nil {
+				key := strings.TrimSpace(matches[1])
+				value := strings.TrimSpace(matches[2])
+
+				switch strings.ToLower(key) {
+				case "version", "document version":
+					doc.Metadata.Version = value
+				case "status":
+					doc.Metadata.Status = value
+				case "date":
+					doc.Metadata.Date = value
+				case "author":
+					doc.Metadata.Author = value
+				case "phase":
+					doc.Metadata.Phase = value
+				}
+			}
+			continue
+		}
 
 		// Extract document title from first H1
 		if strings.HasPrefix(line, "# ") && doc.Title == "" {
@@ -55,7 +100,7 @@ func ParsePlanDocument(filePath string) (*PlanDocument, error) {
 			continue
 		}
 
-		// Parse metadata section
+		// Parse bold metadata section (legacy format)
 		if inMetadata {
 			if matches := metadataRe.FindStringSubmatch(line); matches != nil {
 				key := strings.TrimSpace(matches[1])
@@ -76,8 +121,14 @@ func ParsePlanDocument(filePath string) (*PlanDocument, error) {
 				continue
 			}
 
-			// End of metadata section
-			if line == "" || strings.HasPrefix(line, "##") {
+			// End of metadata section when we hit a header or non-metadata content
+			if strings.HasPrefix(line, "##") {
+				inMetadata = false
+			} else if line == "" {
+				// Skip blank lines in metadata section
+				continue
+			} else if !strings.HasPrefix(line, "**") {
+				// Non-metadata content, exit metadata mode
 				inMetadata = false
 			}
 		}
@@ -113,8 +164,8 @@ func ParsePlanDocument(filePath string) (*PlanDocument, error) {
 			continue
 		}
 
-		// Parse generic headers for section tracking
-		if strings.HasPrefix(line, "#") && currentSection != nil {
+		// Parse generic headers for section tracking (skip H1 which is title)
+		if strings.HasPrefix(line, "##") {
 			level := strings.Count(line, "#")
 			title := strings.TrimPrefix(line, strings.Repeat("#", level))
 			title = strings.TrimSpace(title)
@@ -149,6 +200,7 @@ func ParsePlanDocument(filePath string) (*PlanDocument, error) {
 			}
 
 			sectionStack = append(sectionStack, currentSection)
+			continue
 		}
 
 		// Accumulate content
@@ -190,7 +242,7 @@ func ExtractTasks(section *Section, phaseTitle string) []Task {
 			continue
 		}
 
-		// Extract numbered tasks
+		// Extract numbered tasks from task sections
 		if inTaskSection {
 			if matches := taskListRe.FindStringSubmatch(line); matches != nil {
 				// Save previous task if exists
@@ -209,15 +261,87 @@ func ExtractTasks(section *Section, phaseTitle string) []Task {
 					Criteria:     []string{},
 					Dependencies: []string{},
 				}
+				continue
 			}
 		}
 
-		// Extract deliverables
-		if inDeliverablesSection && currentTask != nil {
-			if matches := checkboxRe.FindStringSubmatch(line); matches != nil {
-				deliverable := strings.TrimSpace(matches[1])
-				currentTask.Deliverables = append(currentTask.Deliverables, deliverable)
+		// Extract checkbox tasks (markdown format: - [ ] or - [x])
+		if matches := checkboxRe.FindStringSubmatch(line); matches != nil {
+			checkState := matches[1]  // 'x' or ' '
+			taskTitle := strings.TrimSpace(matches[2])
+
+			// If in deliverables section and we have a current task, add as deliverable
+			if inDeliverablesSection && currentTask != nil {
+				currentTask.Deliverables = append(currentTask.Deliverables, taskTitle)
+			} else if inTaskSection {
+				// In task section, create new task from checkbox
+				if currentTask != nil {
+					tasks = append(tasks, *currentTask)
+				}
+				taskOrder++
+				currentTask = &Task{
+					Title:        taskTitle,
+					Phase:        phaseTitle,
+					Priority:     2,
+					Order:        taskOrder,
+					Deliverables: []string{},
+					Criteria:     []string{},
+					Dependencies: []string{},
+				}
+				// If checkbox is checked, could mark as completed (future enhancement)
+				_ = checkState
+			} else if !inDeliverablesSection && !inCriteriaSection {
+				// Standalone checkbox outside specific sections - treat as task
+				taskOrder++
+				tasks = append(tasks, Task{
+					Title:        taskTitle,
+					Phase:        phaseTitle,
+					Priority:     2,
+					Order:        taskOrder,
+					Deliverables: []string{},
+					Criteria:     []string{},
+					Dependencies: []string{},
+				})
 			}
+			continue
+		}
+
+		// Extract emoji checkbox tasks (✅ or ☐)
+		if matches := emojiCheckboxRe.FindStringSubmatch(line); matches != nil {
+			taskTitle := strings.TrimSpace(matches[2])
+
+			// If in deliverables section and we have a current task, add as deliverable
+			if inDeliverablesSection && currentTask != nil {
+				currentTask.Deliverables = append(currentTask.Deliverables, taskTitle)
+			} else if inTaskSection {
+				// In task section, create new task from emoji checkbox
+				if currentTask != nil {
+					tasks = append(tasks, *currentTask)
+				}
+				taskOrder++
+				currentTask = &Task{
+					Title:        taskTitle,
+					Phase:        phaseTitle,
+					Priority:     2,
+					Order:        taskOrder,
+					Deliverables: []string{},
+					Criteria:     []string{},
+					Dependencies: []string{},
+				}
+			} else if !inDeliverablesSection && !inCriteriaSection {
+				// Standalone emoji checkbox outside specific sections - treat as task
+				taskOrder++
+				tasks = append(tasks, Task{
+					Title:        taskTitle,
+					Phase:        phaseTitle,
+					Priority:     2,
+					Order:        taskOrder,
+					Deliverables: []string{},
+					Criteria:     []string{},
+					Dependencies: []string{},
+				})
+			}
+			continue
 		}
 
 		// Extract success criteria
