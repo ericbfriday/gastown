@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/steveyegge/gastown/internal/filelock"
 )
 
 // Machine represents a managed machine in the federation.
@@ -25,10 +27,11 @@ type registryData struct {
 }
 
 // MachineRegistry manages machine configurations and provides Connection instances.
+// Uses file-level locking for multi-process safety.
 type MachineRegistry struct {
 	path     string
 	machines map[string]*Machine
-	mu       sync.RWMutex
+	mu       sync.RWMutex // Protects in-memory state
 }
 
 // NewMachineRegistry creates a registry from the given config file path.
@@ -55,8 +58,17 @@ func NewMachineRegistry(configPath string) (*MachineRegistry, error) {
 	return r, nil
 }
 
-// load reads the registry from disk.
+// load reads the registry from disk with file locking.
 func (r *MachineRegistry) load() error {
+	return filelock.WithReadLock(r.path, func() error {
+		return r.loadUnsafe()
+	})
+}
+
+// loadUnsafe reads the registry from disk without file locking.
+// Must only be called when file lock is already held.
+// Still uses in-memory mutex to protect r.machines from concurrent goroutine access.
+func (r *MachineRegistry) loadUnsafe() error {
 	data, err := os.ReadFile(r.path)
 	if err != nil {
 		return err
@@ -67,21 +79,39 @@ func (r *MachineRegistry) load() error {
 		return fmt.Errorf("parsing registry: %w", err)
 	}
 
-	r.machines = rd.Machines
-	if r.machines == nil {
-		r.machines = make(map[string]*Machine)
+	if rd.Machines == nil {
+		rd.Machines = make(map[string]*Machine)
 	}
 
 	// Populate machine names from keys
-	for name, m := range r.machines {
+	for name, m := range rd.Machines {
 		m.Name = name
 	}
+
+	// Update in-memory state under mutex
+	r.mu.Lock()
+	r.machines = rd.Machines
+	r.mu.Unlock()
 
 	return nil
 }
 
-// save writes the registry to disk.
+// save writes the registry to disk atomically with file locking.
 func (r *MachineRegistry) save() error {
+	// Ensure parent directory exists before acquiring lock
+	dir := filepath.Dir(r.path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("creating config directory: %w", err)
+	}
+
+	return filelock.WithWriteLock(r.path, func() error {
+		return r.saveUnsafe()
+	})
+}
+
+// saveUnsafe writes the registry to disk without locking.
+// Must only be called when file lock is already held.
+func (r *MachineRegistry) saveUnsafe() error {
 	rd := registryData{
 		Version:  1,
 		Machines: r.machines,
@@ -92,13 +122,12 @@ func (r *MachineRegistry) save() error {
 		return fmt.Errorf("marshaling registry: %w", err)
 	}
 
-	// Ensure parent directory exists
-	dir := filepath.Dir(r.path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("creating config directory: %w", err)
+	// Atomic write via temp file
+	tmp := r.path + ".tmp"
+	if err := os.WriteFile(tmp, data, fs.FileMode(0644)); err != nil {
+		return fmt.Errorf("writing temp file: %w", err)
 	}
-
-	if err := os.WriteFile(r.path, data, fs.FileMode(0644)); err != nil {
+	if err := os.Rename(tmp, r.path); err != nil {
 		return fmt.Errorf("writing registry: %w", err)
 	}
 
@@ -118,6 +147,7 @@ func (r *MachineRegistry) Get(name string) (*Machine, error) {
 }
 
 // Add adds or updates a machine in the registry.
+// Uses read-modify-write pattern with file locking for multi-process safety.
 func (r *MachineRegistry) Add(m *Machine) error {
 	if m.Name == "" {
 		return fmt.Errorf("machine name is required")
@@ -129,28 +159,58 @@ func (r *MachineRegistry) Add(m *Machine) error {
 		return fmt.Errorf("ssh machine requires host")
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	// Ensure parent directory exists before acquiring lock
+	dir := filepath.Dir(r.path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("creating config directory: %w", err)
+	}
 
-	r.machines[m.Name] = m
-	return r.save()
+	return filelock.WithWriteLock(r.path, func() error {
+		// Reload from disk to get latest state (multi-process safety)
+		if err := r.loadUnsafe(); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("reloading registry: %w", err)
+		}
+
+		// Modify in-memory state (already protected by loadUnsafe's mutex)
+		r.mu.Lock()
+		r.machines[m.Name] = m
+		r.mu.Unlock()
+
+		// Save back to disk
+		return r.saveUnsafe()
+	})
 }
 
 // Remove removes a machine from the registry.
+// Uses read-modify-write pattern with file locking for multi-process safety.
 func (r *MachineRegistry) Remove(name string) error {
 	if name == "local" {
 		return fmt.Errorf("cannot remove local machine")
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	return filelock.WithWriteLock(r.path, func() error {
+		// Reload from disk to get latest state (multi-process safety)
+		if err := r.loadUnsafe(); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("reloading registry: %w", err)
+		}
 
-	if _, ok := r.machines[name]; !ok {
-		return fmt.Errorf("machine not found: %s", name)
-	}
+		// Check if machine exists
+		r.mu.RLock()
+		_, ok := r.machines[name]
+		r.mu.RUnlock()
 
-	delete(r.machines, name)
-	return r.save()
+		if !ok {
+			return fmt.Errorf("machine not found: %s", name)
+		}
+
+		// Modify in-memory state
+		r.mu.Lock()
+		delete(r.machines, name)
+		r.mu.Unlock()
+
+		// Save back to disk
+		return r.saveUnsafe()
+	})
 }
 
 // List returns all machines in the registry.
