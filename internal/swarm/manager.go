@@ -2,22 +2,28 @@ package swarm
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/errors"
 	"github.com/steveyegge/gastown/internal/rig"
 )
 
 // Common errors
 var (
-	ErrSwarmNotFound  = errors.New("swarm not found")
-	ErrSwarmExists    = errors.New("swarm already exists")
-	ErrInvalidState   = errors.New("invalid state transition")
-	ErrNoReadyTasks   = errors.New("no ready tasks")
-	ErrBeadsNotFound  = errors.New("beads not available")
+	ErrSwarmNotFound = errors.Permanent("swarm.NotFound", nil).
+		WithHint("Use 'gt swarm list' to see available swarms")
+	ErrSwarmExists = errors.User("swarm.Exists", "swarm already exists").
+		WithHint("Use a different swarm ID or check existing swarms with 'gt swarm list'")
+	ErrInvalidState = errors.User("swarm.InvalidState", "invalid state transition").
+		WithHint("Check swarm status with 'gt swarm status <id>' to see current state")
+	ErrNoReadyTasks = errors.Permanent("swarm.NoReadyTasks", nil).
+		WithHint("Check epic dependencies with 'bd swarm status <epic-id>' to see blocked tasks")
+	ErrBeadsNotFound = errors.System("swarm.BeadsNotFound", nil).
+		WithHint("Install beads with: brew install beads")
 )
 
 // Manager handles swarm lifecycle operations.
@@ -40,19 +46,7 @@ func NewManager(r *rig.Rig) *Manager {
 // LoadSwarm loads swarm state from beads by querying the epic.
 // This is the canonical way to get swarm state - no in-memory caching.
 func (m *Manager) LoadSwarm(epicID string) (*Swarm, error) {
-	// Query beads for the epic
-	cmd := exec.Command("bd", "show", epicID, "--json")
-	cmd.Dir = m.beadsDir
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("bd show: %s", strings.TrimSpace(stderr.String()))
-	}
-
-	// Parse the epic
+	// Query beads for the epic with retry logic
 	var epic struct {
 		ID        string `json:"id"`
 		Title     string `json:"title"`
@@ -61,13 +55,50 @@ func (m *Manager) LoadSwarm(epicID string) (*Swarm, error) {
 		CreatedAt string `json:"created_at"`
 		UpdatedAt string `json:"updated_at"`
 	}
-	if err := json.Unmarshal(stdout.Bytes(), &epic); err != nil {
-		return nil, fmt.Errorf("parsing epic: %w", err)
+
+	err := errors.RetryWithContext(context.Background(), func() error {
+		cmd := exec.Command("bd", "show", epicID, "--json")
+		cmd.Dir = m.beadsDir
+
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+
+		if err := cmd.Run(); err != nil {
+			stderrStr := strings.TrimSpace(stderr.String())
+			// Check for permanent errors
+			if strings.Contains(stderrStr, "not found") || strings.Contains(stderrStr, "command not found") {
+				return errors.Permanent("swarm.BeadsShowFailed", err).
+					WithContext("epic_id", epicID).
+					WithContext("stderr", stderrStr).
+					WithHint("Verify the epic exists with: bd show " + epicID)
+			}
+			// Transient error - will retry
+			return errors.Transient("swarm.BeadsShowTimeout", err).
+				WithContext("epic_id", epicID).
+				WithContext("stderr", stderrStr)
+		}
+
+		// Parse the epic
+		if err := json.Unmarshal(stdout.Bytes(), &epic); err != nil {
+			return errors.Permanent("swarm.ParseEpicFailed", err).
+				WithContext("epic_id", epicID).
+				WithHint("Epic data may be corrupted. Try: bd show " + epicID)
+		}
+
+		return nil
+	}, errors.DefaultRetryConfig())
+
+	if err != nil {
+		return nil, err
 	}
 
 	// Verify it's a swarm molecule
 	if epic.MolType != "swarm" {
-		return nil, fmt.Errorf("epic %s is not a swarm (mol_type=%s)", epicID, epic.MolType)
+		return nil, errors.User("swarm.NotASwarm", "epic is not a swarm").
+			WithContext("epic_id", epicID).
+			WithContext("mol_type", epic.MolType).
+			WithHint("Check epic type with: bd show " + epicID)
 	}
 
 	// Get current git commit as base
@@ -126,25 +157,44 @@ func (m *Manager) GetSwarm(id string) (*Swarm, error) {
 
 // GetReadyTasks returns tasks ready to be assigned by querying beads.
 func (m *Manager) GetReadyTasks(swarmID string) ([]SwarmTask, error) {
-	// Use bd swarm status to get ready front
-	cmd := exec.Command("bd", "swarm", "status", swarmID, "--json")
-	cmd.Dir = m.beadsDir
-
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
-
-	if err := cmd.Run(); err != nil {
-		return nil, ErrSwarmNotFound
-	}
-
 	var status struct {
 		Ready []struct {
 			ID    string `json:"id"`
 			Title string `json:"title"`
 		} `json:"ready"`
 	}
-	if err := json.Unmarshal(stdout.Bytes(), &status); err != nil {
-		return nil, fmt.Errorf("parsing status: %w", err)
+
+	err := errors.RetryWithContext(context.Background(), func() error {
+		cmd := exec.Command("bd", "swarm", "status", swarmID, "--json")
+		cmd.Dir = m.beadsDir
+
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+
+		if err := cmd.Run(); err != nil {
+			stderrStr := strings.TrimSpace(stderr.String())
+			if strings.Contains(stderrStr, "not found") {
+				return errors.Permanent("swarm.StatusNotFound", err).
+					WithContext("swarm_id", swarmID).
+					WithHint("Use 'gt swarm list' to see available swarms")
+			}
+			return errors.Transient("swarm.StatusQueryFailed", err).
+				WithContext("swarm_id", swarmID).
+				WithContext("stderr", stderrStr)
+		}
+
+		if err := json.Unmarshal(stdout.Bytes(), &status); err != nil {
+			return errors.Permanent("swarm.ParseStatusFailed", err).
+				WithContext("swarm_id", swarmID).
+				WithHint("Try running: bd swarm status " + swarmID)
+		}
+
+		return nil
+	}, errors.DefaultRetryConfig())
+
+	if err != nil {
+		return nil, err
 	}
 
 	if len(status.Ready) == 0 {
@@ -164,23 +214,43 @@ func (m *Manager) GetReadyTasks(swarmID string) ([]SwarmTask, error) {
 
 // IsComplete checks if all tasks are closed by querying beads.
 func (m *Manager) IsComplete(swarmID string) (bool, error) {
-	cmd := exec.Command("bd", "swarm", "status", swarmID, "--json")
-	cmd.Dir = m.beadsDir
-
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
-
-	if err := cmd.Run(); err != nil {
-		return false, ErrSwarmNotFound
-	}
-
 	var status struct {
 		Ready   []struct{ ID string } `json:"ready"`
 		Active  []struct{ ID string } `json:"active"`
 		Blocked []struct{ ID string } `json:"blocked"`
 	}
-	if err := json.Unmarshal(stdout.Bytes(), &status); err != nil {
-		return false, fmt.Errorf("parsing status: %w", err)
+
+	err := errors.RetryWithContext(context.Background(), func() error {
+		cmd := exec.Command("bd", "swarm", "status", swarmID, "--json")
+		cmd.Dir = m.beadsDir
+
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+
+		if err := cmd.Run(); err != nil {
+			stderrStr := strings.TrimSpace(stderr.String())
+			if strings.Contains(stderrStr, "not found") {
+				return errors.Permanent("swarm.IsCompleteNotFound", err).
+					WithContext("swarm_id", swarmID).
+					WithHint("Use 'gt swarm list' to see available swarms")
+			}
+			return errors.Transient("swarm.IsCompleteQueryFailed", err).
+				WithContext("swarm_id", swarmID).
+				WithContext("stderr", stderrStr)
+		}
+
+		if err := json.Unmarshal(stdout.Bytes(), &status); err != nil {
+			return errors.Permanent("swarm.ParseCompletionStatusFailed", err).
+				WithContext("swarm_id", swarmID).
+				WithHint("Try running: bd swarm status " + swarmID)
+		}
+
+		return nil
+	}, errors.DefaultRetryConfig())
+
+	if err != nil {
+		return false, err
 	}
 
 	// Complete if nothing is ready, active, or blocked
@@ -213,19 +283,6 @@ func isValidTransition(from, to SwarmState) bool {
 
 // loadTasksFromBeads loads child issues from beads CLI.
 func (m *Manager) loadTasksFromBeads(epicID string) ([]SwarmTask, error) {
-	// Run: bd show <epicID> --json to get epic with children
-	cmd := exec.Command("bd", "show", epicID, "--json")
-	cmd.Dir = m.beadsDir
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("bd show: %s", strings.TrimSpace(stderr.String()))
-	}
-
-	// Parse JSON output - bd show returns an array
 	var issues []struct {
 		ID         string `json:"id"`
 		Title      string `json:"title"`
@@ -239,12 +296,45 @@ func (m *Manager) loadTasksFromBeads(epicID string) ([]SwarmTask, error) {
 		} `json:"dependents"`
 	}
 
-	if err := json.Unmarshal(stdout.Bytes(), &issues); err != nil {
-		return nil, fmt.Errorf("parsing bd output: %w", err)
+	err := errors.RetryWithContext(context.Background(), func() error {
+		cmd := exec.Command("bd", "show", epicID, "--json")
+		cmd.Dir = m.beadsDir
+
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+
+		if err := cmd.Run(); err != nil {
+			stderrStr := strings.TrimSpace(stderr.String())
+			// Permanent error if not found
+			if strings.Contains(stderrStr, "not found") {
+				return errors.Permanent("swarm.LoadTasksNotFound", err).
+					WithContext("epic_id", epicID).
+					WithHint("Verify the epic exists with: bd show " + epicID)
+			}
+			// Transient error - will retry
+			return errors.Transient("swarm.LoadTasksTimeout", err).
+				WithContext("epic_id", epicID).
+				WithContext("stderr", stderrStr)
+		}
+
+		if err := json.Unmarshal(stdout.Bytes(), &issues); err != nil {
+			return errors.Permanent("swarm.ParseTasksFailed", err).
+				WithContext("epic_id", epicID).
+				WithHint("Epic data may be corrupted. Try: bd show " + epicID)
+		}
+
+		return nil
+	}, errors.DefaultRetryConfig())
+
+	if err != nil {
+		return nil, err
 	}
 
 	if len(issues) == 0 {
-		return nil, fmt.Errorf("epic not found: %s", epicID)
+		return nil, errors.Permanent("swarm.EpicNotFound", nil).
+			WithContext("epic_id", epicID).
+			WithHint("Verify the epic exists with: bd show " + epicID)
 	}
 
 	// Extract dependents as tasks (issues that depend on/are blocked by this epic)

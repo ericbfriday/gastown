@@ -194,7 +194,7 @@ func getSwarmRig(rigName string) (*rig.Rig, string, error) {
 	rigMgr := rig.NewManager(townRoot, rigsConfig, g)
 	r, err := rigMgr.GetRig(rigName)
 	if err != nil {
-		return nil, "", fmt.Errorf("rig '%s' not found", rigName)
+		return nil, "", fmt.Errorf("rig '%s' not found. Use 'gt rig list' to see available rigs", rigName)
 	}
 
 	return r, townRoot, nil

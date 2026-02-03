@@ -2,17 +2,21 @@ package swarm
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/errors"
 )
 
 // Integration branch errors
 var (
-	ErrBranchExists     = errors.New("branch already exists")
-	ErrBranchNotFound   = errors.New("branch not found")
-	ErrNotOnIntegration = errors.New("not on integration branch")
+	ErrBranchExists = errors.User("swarm.BranchExists", "branch already exists").
+		WithHint("Use a different branch name or delete the existing branch first")
+	ErrBranchNotFound = errors.Permanent("swarm.BranchNotFound", nil).
+		WithHint("Check available branches with: git branch -a")
+	ErrNotOnIntegration = errors.User("swarm.NotOnIntegration", "not on integration branch").
+		WithHint("Switch to integration branch with: git checkout <integration-branch>")
 )
 
 // SwarmGitError contains raw output from a git command for observation.
@@ -48,11 +52,16 @@ func (m *Manager) CreateIntegrationBranch(swarmID string) error {
 
 	// Create branch from BaseCommit
 	if err := m.gitRun("checkout", "-b", branchName, swarm.BaseCommit); err != nil {
-		return fmt.Errorf("creating branch: %w", err)
+		return errors.System("swarm.CreateBranchFailed", err).
+			WithContext("branch", branchName).
+			WithContext("base_commit", swarm.BaseCommit).
+			WithHint("Check git status with: git status")
 	}
 
-	// Push to origin (non-fatal: may not have remote)
-	_ = m.gitRun("push", "-u", "origin", branchName)
+	// Push to origin with network retry (non-fatal: may not have remote)
+	_ = errors.Retry(func() error {
+		return m.gitRun("push", "-u", "origin", branchName)
+	}, errors.NetworkRetryConfig())
 
 	return nil
 }
@@ -68,16 +77,20 @@ func (m *Manager) MergeToIntegration(swarmID, workerBranch string) error {
 	// Ensure we're on the integration branch
 	currentBranch, err := m.getCurrentBranch()
 	if err != nil {
-		return fmt.Errorf("getting current branch: %w", err)
+		return err
 	}
 	if currentBranch != swarm.Integration {
 		if err := m.gitRun("checkout", swarm.Integration); err != nil {
-			return fmt.Errorf("checking out integration: %w", err)
+			return errors.System("swarm.CheckoutIntegrationFailed", err).
+				WithContext("integration_branch", swarm.Integration).
+				WithHint("Check git status with: git status")
 		}
 	}
 
-	// Fetch the worker branch (non-fatal: may not exist on remote, try local)
-	_ = m.gitRun("fetch", "origin", workerBranch)
+	// Fetch the worker branch with network retry (non-fatal: may not exist on remote, try local)
+	_ = errors.Retry(func() error {
+		return m.gitRun("fetch", "origin", workerBranch)
+	}, errors.NetworkRetryConfig())
 
 	// Attempt merge
 	err = m.gitRun("merge", "--no-ff", "-m",
@@ -87,10 +100,17 @@ func (m *Manager) MergeToIntegration(swarmID, workerBranch string) error {
 		// ZFC: Use git's porcelain output to detect conflicts instead of parsing stderr.
 		conflicts, conflictErr := m.getConflictingFiles()
 		if conflictErr == nil && len(conflicts) > 0 {
-			// Return the original error with raw output for observation
-			return err
+			// Return enhanced error with conflict details
+			return errors.User("swarm.MergeConflict", "merge conflict").
+				WithContext("worker_branch", workerBranch).
+				WithContext("integration_branch", swarm.Integration).
+				WithContext("conflicting_files", strings.Join(conflicts, ", ")).
+				WithHint(fmt.Sprintf("Resolve conflicts in: %s\nThen run: git add . && git commit", strings.Join(conflicts, ", ")))
 		}
-		return fmt.Errorf("merging: %w", err)
+		return errors.System("swarm.MergeFailed", err).
+			WithContext("worker_branch", workerBranch).
+			WithContext("integration_branch", swarm.Integration).
+			WithHint("Check git status with: git status")
 	}
 
 	return nil
@@ -110,11 +130,15 @@ func (m *Manager) LandToMain(swarmID string) error {
 
 	// Checkout target branch
 	if err := m.gitRun("checkout", swarm.TargetBranch); err != nil {
-		return fmt.Errorf("checking out %s: %w", swarm.TargetBranch, err)
+		return errors.System("swarm.CheckoutTargetFailed", err).
+			WithContext("target_branch", swarm.TargetBranch).
+			WithHint("Check git status with: git status")
 	}
 
-	// Pull latest (non-fatal: may fail if remote unreachable)
-	_ = m.gitRun("pull", "origin", swarm.TargetBranch)
+	// Pull latest with network retry (non-fatal: may fail if remote unreachable)
+	_ = errors.Retry(func() error {
+		return m.gitRun("pull", "origin", swarm.TargetBranch)
+	}, errors.NetworkRetryConfig())
 
 	// Merge integration branch
 	err = m.gitRun("merge", "--no-ff", "-m",
@@ -124,15 +148,27 @@ func (m *Manager) LandToMain(swarmID string) error {
 		// ZFC: Use git's porcelain output to detect conflicts instead of parsing stderr.
 		conflicts, conflictErr := m.getConflictingFiles()
 		if conflictErr == nil && len(conflicts) > 0 {
-			// Return the original error with raw output for observation
-			return err
+			// Return enhanced error with conflict details
+			return errors.User("swarm.LandConflict", "merge conflict during landing").
+				WithContext("swarm_id", swarmID).
+				WithContext("target_branch", swarm.TargetBranch).
+				WithContext("integration_branch", swarm.Integration).
+				WithContext("conflicting_files", strings.Join(conflicts, ", ")).
+				WithHint(fmt.Sprintf("Resolve conflicts in: %s\nThen run: git add . && git commit", strings.Join(conflicts, ", ")))
 		}
-		return fmt.Errorf("merging to %s: %w", swarm.TargetBranch, err)
+		return errors.System("swarm.LandMergeFailed", err).
+			WithContext("swarm_id", swarmID).
+			WithContext("target_branch", swarm.TargetBranch).
+			WithHint("Check git status with: git status")
 	}
 
-	// Push
-	if err := m.gitRun("push", "origin", swarm.TargetBranch); err != nil {
-		return fmt.Errorf("pushing: %w", err)
+	// Push with network retry
+	if err := errors.Retry(func() error {
+		return m.gitRun("push", "origin", swarm.TargetBranch)
+	}, errors.NetworkRetryConfig()); err != nil {
+		return errors.Transient("swarm.PushFailed", err).
+			WithContext("target_branch", swarm.TargetBranch).
+			WithHint("Check network connection and retry with: git push origin " + swarm.TargetBranch)
 	}
 
 	return nil
@@ -152,16 +188,20 @@ func (m *Manager) CleanupBranches(swarmID string) error {
 		lastErr = err
 	}
 
-	// Delete integration branch remotely (best-effort cleanup)
-	_ = m.gitRun("push", "origin", "--delete", swarm.Integration)
+	// Delete integration branch remotely with network retry (best-effort cleanup)
+	_ = errors.Retry(func() error {
+		return m.gitRun("push", "origin", "--delete", swarm.Integration)
+	}, errors.NetworkRetryConfig())
 
-	// Delete worker branches (best-effort cleanup)
+	// Delete worker branches with network retry (best-effort cleanup)
 	for _, task := range swarm.Tasks {
 		if task.Branch != "" {
 			// Local delete
 			_ = m.gitRun("branch", "-D", task.Branch)
-			// Remote delete
-			_ = m.gitRun("push", "origin", "--delete", task.Branch)
+			// Remote delete with network retry
+			_ = errors.Retry(func() error {
+				return m.gitRun("push", "origin", "--delete", task.Branch)
+			}, errors.NetworkRetryConfig())
 		}
 	}
 
@@ -193,11 +233,15 @@ func (m *Manager) getCurrentBranch() (string, error) {
 	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
 	cmd.Dir = m.gitDir
 
-	var stdout bytes.Buffer
+	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return "", err
+		return "", errors.System("swarm.GetCurrentBranchFailed", err).
+			WithContext("dir", m.gitDir).
+			WithContext("stderr", strings.TrimSpace(stderr.String())).
+			WithHint("Check git status with: git status")
 	}
 
 	return strings.TrimSpace(stdout.String()), nil
@@ -209,11 +253,15 @@ func (m *Manager) getConflictingFiles() ([]string, error) {
 	cmd := exec.Command("git", "diff", "--name-only", "--diff-filter=U")
 	cmd.Dir = m.gitDir
 
-	var stdout bytes.Buffer
+	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return nil, err
+		return nil, errors.System("swarm.GetConflictsFailed", err).
+			WithContext("dir", m.gitDir).
+			WithContext("stderr", strings.TrimSpace(stderr.String())).
+			WithHint("Check git status with: git status")
 	}
 
 	out := strings.TrimSpace(stdout.String())

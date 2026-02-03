@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/errors"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -57,16 +58,18 @@ func (m *Manager) ExecuteLanding(swarmID string, config LandingConfig) (*Landing
 		SwarmID: swarmID,
 	}
 
-	// Phase 1: Stop all polecat sessions
+	// Phase 1: Stop all polecat sessions with retry
 	t := tmux.NewTmux()
 	polecatMgr := polecat.NewSessionManager(t, m.rig)
 
 	for _, worker := range swarm.Workers {
 		running, _ := polecatMgr.IsRunning(worker)
 		if running {
-			err := polecatMgr.Stop(worker, config.ForceKill)
+			err := errors.Retry(func() error {
+				return polecatMgr.Stop(worker, config.ForceKill)
+			}, errors.DefaultRetryConfig())
 			if err != nil {
-				// Continue anyway
+				// Continue anyway - non-fatal
 			} else {
 				result.SessionsStopped++
 			}
@@ -95,7 +98,11 @@ func (m *Manager) ExecuteLanding(swarmID string, config LandingConfig) (*Landing
 				m.notifyMayorCodeAtRisk(config.TownRoot, swarmID, result.PolecatsAtRisk)
 			}
 
-			return result, nil
+			// Return enhanced error with context
+			return result, errors.User("swarm.CodeAtRisk", "uncommitted or unpushed code").
+				WithContext("swarm_id", swarmID).
+				WithContext("workers_at_risk", strings.Join(result.PolecatsAtRisk, ", ")).
+				WithHint("Review and commit/push worker code before landing. Check with: git status")
 		}
 	}
 
@@ -188,7 +195,16 @@ func (m *Manager) gitRunOutput(dir string, args ...string) (string, error) {
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("%s", strings.TrimSpace(stderr.String()))
+		// Determine command name for context
+		command := "git"
+		if len(args) > 0 {
+			command = args[0]
+		}
+		return "", errors.System("swarm.GitCommandFailed", err).
+			WithContext("command", command).
+			WithContext("dir", dir).
+			WithContext("stderr", strings.TrimSpace(stderr.String())).
+			WithHint("Check git status with: git status")
 	}
 
 	return stdout.String(), nil

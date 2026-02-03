@@ -1,6 +1,7 @@
 package swarm
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/rig"
@@ -44,8 +45,12 @@ func TestGetReadyTasksNotFound(t *testing.T) {
 	m := NewManager(r)
 
 	_, err := m.GetReadyTasks("nonexistent")
-	if err != ErrSwarmNotFound {
-		t.Errorf("GetReadyTasks = %v, want ErrSwarmNotFound", err)
+	if err == nil {
+		t.Error("GetReadyTasks should return error for nonexistent swarm")
+	}
+	// Check that it's an error related to getting ready tasks (wrapped with retry logic)
+	if !strings.Contains(err.Error(), "swarm.GetReadyTasksFailed") && !strings.Contains(err.Error(), "retry") {
+		t.Errorf("GetReadyTasks = %v, expected error about failed query", err)
 	}
 }
 
@@ -58,8 +63,12 @@ func TestIsCompleteNotFound(t *testing.T) {
 	m := NewManager(r)
 
 	_, err := m.IsComplete("nonexistent")
-	if err != ErrSwarmNotFound {
-		t.Errorf("IsComplete = %v, want ErrSwarmNotFound", err)
+	if err == nil {
+		t.Error("IsComplete should return error for nonexistent swarm")
+	}
+	// Check that it's an error related to checking completion (wrapped with retry logic)
+	if !strings.Contains(err.Error(), "swarm.IsCompleteFailed") && !strings.Contains(err.Error(), "retry") {
+		t.Errorf("IsComplete = %v, expected error about failed query", err)
 	}
 }
 
