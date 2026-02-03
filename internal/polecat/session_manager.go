@@ -3,7 +3,6 @@ package polecat
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/errors"
 	"github.com/steveyegge/gastown/internal/hooks"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runtime"
@@ -29,9 +29,12 @@ func debugSession(context string, err error) {
 
 // Session errors
 var (
-	ErrSessionRunning  = errors.New("session already running")
-	ErrSessionNotFound = errors.New("session not found")
-	ErrIssueInvalid    = errors.New("issue not found or tombstoned")
+	ErrSessionRunning = errors.User("polecat.SessionRunning", "session already running").
+		WithHint("Attach to the existing session with: gt polecat attach <rig>/<name>")
+	ErrSessionNotFound = errors.Permanent("polecat.SessionNotFound", nil).
+		WithHint("Check active sessions with: gt polecat list")
+	ErrIssueInvalid = errors.User("polecat.IssueInvalid", "issue not found or tombstoned").
+		WithHint("Verify the issue exists with: bd show <issue-id>")
 )
 
 // SessionManager handles polecat session lifecycle.
@@ -142,7 +145,7 @@ func (m *SessionManager) hasPolecat(polecat string) bool {
 // Start creates and starts a new session for a polecat.
 func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	if !m.hasPolecat(polecat) {
-		return fmt.Errorf("%w: %s", ErrPolecatNotFound, polecat)
+		return ErrPolecatNotFound.WithContext("polecat", polecat).WithContext("rig", m.rig.Name)
 	}
 
 	sessionID := m.SessionName(polecat)
@@ -152,10 +155,12 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	// so by this point, any existing session should be legitimately in use.
 	running, err := m.tmux.HasSession(sessionID)
 	if err != nil {
-		return fmt.Errorf("checking session: %w", err)
+		return errors.Transient("session.CheckSession", err).
+			WithContext("session_id", sessionID).
+			WithHint("Check tmux status and try again")
 	}
 	if running {
-		return fmt.Errorf("%w: %s", ErrSessionRunning, sessionID)
+		return ErrSessionRunning.WithContext("session_id", sessionID)
 	}
 
 	// Determine working directory
@@ -167,7 +172,10 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	// Fire pre-session-start hooks (can block session startup)
 	townRoot := filepath.Dir(m.rig.Path)
 	if err := m.firePreSessionStartHooks(townRoot, polecat, workDir, opts.Issue); err != nil {
-		return fmt.Errorf("pre-session-start hook blocked: %w", err)
+		return errors.User("session.HookBlocked", "pre-session-start hook blocked startup").
+			WithContext("polecat", polecat).
+			WithContext("hook_error", err.Error()).
+			WithHint("Check hook scripts in .runtime/hooks/ and resolve the issue")
 	}
 
 	// Validate issue exists and isn't tombstoned BEFORE creating session.
@@ -184,7 +192,9 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	// write into the source repo. Runtime walks up the tree to find settings.
 	polecatsDir := filepath.Join(m.rig.Path, "polecats")
 	if err := runtime.EnsureSettingsForRole(polecatsDir, "polecat", runtimeConfig); err != nil {
-		return fmt.Errorf("ensuring runtime settings: %w", err)
+		return errors.System("session.EnsureSettings", err).
+			WithContext("dir", polecatsDir).
+			WithHint("Check file system permissions for polecats/ directory")
 	}
 
 	// Build startup command with beacon for predecessor discovery.
@@ -209,7 +219,10 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	// Create session with command directly to avoid send-keys race condition.
 	// See: https://github.com/anthropics/gastown/issues/280
 	if err := m.tmux.NewSessionWithCommand(sessionID, workDir, command); err != nil {
-		return fmt.Errorf("creating session: %w", err)
+		return errors.Transient("session.Create", err).
+			WithContext("session_id", sessionID).
+			WithContext("work_dir", workDir).
+			WithHint("Check tmux configuration and try again")
 	}
 
 	// Set environment (non-fatal: session works without these)
@@ -256,10 +269,14 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	// Without this check, Start() would return success even if the pane died during initialization.
 	running, err = m.tmux.HasSession(sessionID)
 	if err != nil {
-		return fmt.Errorf("verifying session: %w", err)
+		return errors.Transient("session.VerifySession", err).
+			WithContext("session_id", sessionID).
+			WithHint("Check tmux status and try again")
 	}
 	if !running {
-		return fmt.Errorf("session %s died during startup (agent command may have failed)", sessionID)
+		return errors.Permanent("session.StartupFailed", nil).
+			WithContext("session_id", sessionID).
+			WithHint("Check the agent command configuration or runtime settings")
 	}
 
 	// Fire post-session-start hooks (best-effort, don't fail session startup)
@@ -274,10 +291,12 @@ func (m *SessionManager) Stop(polecat string, force bool) error {
 
 	running, err := m.tmux.HasSession(sessionID)
 	if err != nil {
-		return fmt.Errorf("checking session: %w", err)
+		return errors.Transient("session.CheckSession", err).
+			WithContext("session_id", sessionID).
+			WithHint("Check tmux status and try again")
 	}
 	if !running {
-		return ErrSessionNotFound
+		return ErrSessionNotFound.WithContext("session_id", sessionID)
 	}
 
 	// Fire pre-shutdown hooks (can block shutdown)
@@ -285,7 +304,10 @@ func (m *SessionManager) Stop(polecat string, force bool) error {
 	workDir := m.clonePath(polecat)
 	if !force {
 		if err := m.firePreShutdownHooks(townRoot, polecat, workDir); err != nil {
-			return fmt.Errorf("pre-shutdown hook blocked: %w", err)
+			return errors.User("session.HookBlocked", "pre-shutdown hook blocked stop").
+				WithContext("polecat", polecat).
+				WithContext("hook_error", err.Error()).
+				WithHint("Check hook scripts in .runtime/hooks/ or use --force to bypass")
 		}
 	}
 
@@ -298,7 +320,9 @@ func (m *SessionManager) Stop(polecat string, force bool) error {
 	// Use KillSessionWithProcesses to ensure all descendant processes are killed.
 	// This prevents orphan bash processes from Claude's Bash tool surviving session termination.
 	if err := m.tmux.KillSessionWithProcesses(sessionID); err != nil {
-		return fmt.Errorf("killing session: %w", err)
+		return errors.Transient("session.Kill", err).
+			WithContext("session_id", sessionID).
+			WithHint("Check tmux status and try again")
 	}
 
 	// Fire post-shutdown hooks (best-effort)
@@ -319,7 +343,9 @@ func (m *SessionManager) Status(polecat string) (*SessionInfo, error) {
 
 	running, err := m.tmux.HasSession(sessionID)
 	if err != nil {
-		return nil, fmt.Errorf("checking session: %w", err)
+		return nil, errors.Transient("session.CheckSession", err).
+			WithContext("session_id", sessionID).
+			WithHint("Check tmux status and try again")
 	}
 
 	info := &SessionInfo{
@@ -399,10 +425,12 @@ func (m *SessionManager) Attach(polecat string) error {
 
 	running, err := m.tmux.HasSession(sessionID)
 	if err != nil {
-		return fmt.Errorf("checking session: %w", err)
+		return errors.Transient("session.CheckSession", err).
+			WithContext("session_id", sessionID).
+			WithHint("Check tmux status and try again")
 	}
 	if !running {
-		return ErrSessionNotFound
+		return ErrSessionNotFound.WithContext("session_id", sessionID)
 	}
 
 	return m.tmux.AttachSession(sessionID)
@@ -414,10 +442,12 @@ func (m *SessionManager) Capture(polecat string, lines int) (string, error) {
 
 	running, err := m.tmux.HasSession(sessionID)
 	if err != nil {
-		return "", fmt.Errorf("checking session: %w", err)
+		return "", errors.Transient("session.CheckSession", err).
+			WithContext("session_id", sessionID).
+			WithHint("Check tmux status and try again")
 	}
 	if !running {
-		return "", ErrSessionNotFound
+		return "", ErrSessionNotFound.WithContext("session_id", sessionID)
 	}
 
 	return m.tmux.CapturePane(sessionID, lines)
@@ -427,10 +457,12 @@ func (m *SessionManager) Capture(polecat string, lines int) (string, error) {
 func (m *SessionManager) CaptureSession(sessionID string, lines int) (string, error) {
 	running, err := m.tmux.HasSession(sessionID)
 	if err != nil {
-		return "", fmt.Errorf("checking session: %w", err)
+		return "", errors.Transient("session.CheckSession", err).
+			WithContext("session_id", sessionID).
+			WithHint("Check tmux status and try again")
 	}
 	if !running {
-		return "", ErrSessionNotFound
+		return "", ErrSessionNotFound.WithContext("session_id", sessionID)
 	}
 
 	return m.tmux.CapturePane(sessionID, lines)
@@ -442,10 +474,12 @@ func (m *SessionManager) Inject(polecat, message string) error {
 
 	running, err := m.tmux.HasSession(sessionID)
 	if err != nil {
-		return fmt.Errorf("checking session: %w", err)
+		return errors.Transient("session.CheckSession", err).
+			WithContext("session_id", sessionID).
+			WithHint("Check tmux status and try again")
 	}
 	if !running {
-		return ErrSessionNotFound
+		return ErrSessionNotFound.WithContext("session_id", sessionID)
 	}
 
 	debounceMs := 200 + (len(message)/1024)*100
@@ -481,20 +515,22 @@ func (m *SessionManager) validateIssue(issueID, workDir string) error {
 	cmd.Dir = workDir
 	output, err := cmd.Output()
 	if err != nil {
-		return fmt.Errorf("%w: %s", ErrIssueInvalid, issueID)
+		return ErrIssueInvalid.WithContext("issue_id", issueID)
 	}
 
 	var issues []struct {
 		Status string `json:"status"`
 	}
 	if err := json.Unmarshal(output, &issues); err != nil {
-		return fmt.Errorf("parsing issue: %w", err)
+		return errors.System("session.ParseIssue", err).
+			WithContext("issue_id", issueID).
+			WithHint("Check beads installation with: bd status")
 	}
 	if len(issues) == 0 {
-		return fmt.Errorf("%w: %s", ErrIssueInvalid, issueID)
+		return ErrIssueInvalid.WithContext("issue_id", issueID)
 	}
 	if issues[0].Status == "tombstone" {
-		return fmt.Errorf("%w: %s is tombstoned", ErrIssueInvalid, issueID)
+		return ErrIssueInvalid.WithContext("issue_id", issueID).WithContext("status", "tombstone")
 	}
 	return nil
 }
@@ -505,7 +541,10 @@ func (m *SessionManager) hookIssue(issueID, agentID, workDir string) error {
 	cmd.Dir = workDir
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("bd update failed: %w", err)
+		return errors.Transient("session.HookIssue", err).
+			WithContext("issue_id", issueID).
+			WithContext("agent_id", agentID).
+			WithHint("Check that beads is available with: bd status")
 	}
 	fmt.Printf("✓ Hooked issue %s to %s\n", issueID, agentID)
 	return nil

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/steveyegge/gastown/internal/errors"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -366,7 +367,10 @@ func (p *NamePool) SetTheme(theme string) error {
 	defer p.mu.Unlock()
 
 	if _, ok := BuiltinThemes[theme]; !ok {
-		return fmt.Errorf("unknown theme: %s (available: mad-max, minerals, wasteland)", theme)
+		availableThemes := "mad-max, minerals, wasteland"
+		return errors.User("namepool.UnknownTheme", fmt.Sprintf("unknown theme: %s", theme)).
+			WithContext("theme", theme).
+			WithHint(fmt.Sprintf("Use one of the available themes: %s", availableThemes))
 	}
 
 	// Preserve names that exist in both themes
@@ -417,7 +421,10 @@ func GetThemeNames(theme string) ([]string, error) {
 	if names, ok := BuiltinThemes[theme]; ok {
 		return names, nil
 	}
-	return nil, fmt.Errorf("unknown theme: %s", theme)
+	availableThemes := "mad-max, minerals, wasteland"
+	return nil, errors.User("namepool.UnknownTheme", fmt.Sprintf("unknown theme: %s", theme)).
+		WithContext("theme", theme).
+		WithHint(fmt.Sprintf("Use one of the available themes: %s", availableThemes))
 }
 
 // AddCustomName adds a custom name to the pool.
@@ -524,7 +531,9 @@ func (p *NamePool) RemoveCustomName(name string) error {
 	}
 
 	if !found {
-		return fmt.Errorf("name '%s' is not a custom name", name)
+		return errors.User("namepool.NotCustomName", fmt.Sprintf("name '%s' is not a custom name", name)).
+			WithContext("name", name).
+			WithHint("Check available custom names or use a themed name")
 	}
 
 	// Also release from InUse if it was allocated

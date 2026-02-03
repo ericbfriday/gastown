@@ -2,12 +2,12 @@
 package polecat
 
 import (
-	"fmt"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/errors"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -44,13 +44,17 @@ func CheckInboxForSpawns(townRoot string) ([]*PendingSpawn, error) {
 	router := mail.NewRouter(townRoot)
 	mailbox, err := router.GetMailbox("deacon/")
 	if err != nil {
-		return nil, fmt.Errorf("getting deacon mailbox: %w", err)
+		return nil, errors.System("pending.GetMailbox", err).
+			WithContext("mailbox", "deacon/").
+			WithHint("Check that the deacon mailbox exists in the town")
 	}
 
 	// Get all messages (both read and unread - we track by archival status)
 	messages, err := mailbox.List()
 	if err != nil {
-		return nil, fmt.Errorf("listing messages: %w", err)
+		return nil, errors.Transient("pending.ListMessages", err).
+			WithContext("mailbox", "deacon/").
+			WithHint("Check mail directory permissions")
 	}
 
 	var pending []*PendingSpawn
@@ -108,7 +112,7 @@ type TriggerResult struct {
 func TriggerPendingSpawns(townRoot string, timeout time.Duration) ([]TriggerResult, error) {
 	pending, err := CheckInboxForSpawns(townRoot)
 	if err != nil {
-		return nil, fmt.Errorf("checking inbox: %w", err)
+		return nil, err // Already wrapped by CheckInboxForSpawns
 	}
 
 	if len(pending) == 0 {
@@ -124,14 +128,17 @@ func TriggerPendingSpawns(townRoot string, timeout time.Duration) ([]TriggerResu
 		// Check if session still exists (ZFC: query tmux directly)
 		running, err := t.HasSession(ps.Session)
 		if err != nil {
-			result.Error = fmt.Errorf("checking session: %w", err)
+			result.Error = errors.Transient("pending.CheckSession", err).
+				WithContext("session_id", ps.Session).
+				WithHint("Check tmux status")
 			results = append(results, result)
 			continue
 		}
 
 		if !running {
 			// Session gone - archive the mail (spawn is dead)
-			result.Error = fmt.Errorf("session no longer exists")
+			result.Error = errors.Permanent("pending.SessionDead", nil).
+				WithContext("session_id", ps.Session)
 			if ps.mailbox != nil {
 				_ = ps.mailbox.Archive(ps.MailID)
 			}
@@ -151,7 +158,9 @@ func TriggerPendingSpawns(townRoot string, timeout time.Duration) ([]TriggerResu
 		// Runtime is ready - send trigger
 		triggerMsg := "Begin."
 		if err := t.NudgeSession(ps.Session, triggerMsg); err != nil {
-			result.Error = fmt.Errorf("nudging session: %w", err)
+			result.Error = errors.Transient("pending.NudgeSession", err).
+				WithContext("session_id", ps.Session).
+				WithHint("Check tmux status and session availability")
 			results = append(results, result)
 			continue
 		}

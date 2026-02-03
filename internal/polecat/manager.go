@@ -3,7 +3,6 @@
 package polecat
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/errors"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -22,11 +22,16 @@ import (
 
 // Common errors
 var (
-	ErrPolecatExists      = errors.New("polecat already exists")
-	ErrPolecatNotFound    = errors.New("polecat not found")
-	ErrHasChanges         = errors.New("polecat has uncommitted changes")
-	ErrHasUncommittedWork = errors.New("polecat has uncommitted work")
-	ErrShellInWorktree    = errors.New("shell working directory is inside polecat worktree")
+	ErrPolecatExists = errors.User("polecat.Exists", "polecat already exists").
+		WithHint("Use a different name or remove the existing polecat with: gt polecat nuke <rig>/<name>")
+	ErrPolecatNotFound = errors.Permanent("polecat.NotFound", nil).
+		WithHint("Use 'gt polecat list' to see available polecats")
+	ErrHasChanges = errors.User("polecat.HasChanges", "polecat has uncommitted changes").
+		WithHint("Commit your changes with: gt polecat commit <rig>/<name>")
+	ErrHasUncommittedWork = errors.User("polecat.HasUncommittedWork", "polecat has uncommitted work").
+		WithHint("Review changes with 'git status' and commit or stash them before removal")
+	ErrShellInWorktree = errors.User("polecat.ShellInWorktree", "shell working directory is inside polecat worktree").
+		WithHint("Change directory outside the worktree before removing it")
 )
 
 // UncommittedWorkError provides details about uncommitted work.
@@ -179,7 +184,9 @@ func (m *Manager) repoBase() (*git.Git, error) {
 	// Fall back to mayor/rig (legacy architecture)
 	mayorPath := filepath.Join(m.rig.Path, "mayor", "rig")
 	if _, err := os.Stat(mayorPath); os.IsNotExist(err) {
-		return nil, fmt.Errorf("no repo base found (neither .repo.git nor mayor/rig exists)")
+		return nil, errors.System("polecat.NoRepoBase", nil).
+			WithContext("rig", m.rig.Name).
+			WithHint("Initialize a bare repo with: git init --bare .repo.git")
 	}
 	return git.NewGit(mayorPath), nil
 }
@@ -347,7 +354,7 @@ func (m *Manager) Add(name string) (*Polecat, error) {
 // cross-beads routing issues when slinging work to new polecats.
 func (m *Manager) AddWithOptions(name string, opts AddOptions) (*Polecat, error) {
 	if m.exists(name) {
-		return nil, ErrPolecatExists
+		return nil, ErrPolecatExists.WithContext("name", name).WithContext("rig", m.rig.Name)
 	}
 
 	// New structure: polecats/<name>/<rigname>/ for LLM ergonomics
@@ -360,13 +367,17 @@ func (m *Manager) AddWithOptions(name string, opts AddOptions) (*Polecat, error)
 
 	// Create polecat directory (polecats/<name>/)
 	if err := os.MkdirAll(polecatDir, 0755); err != nil {
-		return nil, fmt.Errorf("creating polecat dir: %w", err)
+		return nil, errors.System("polecat.CreateDir", err).
+			WithContext("dir", polecatDir).
+			WithHint("Check file system permissions and available disk space")
 	}
 
 	// Get the repo base (bare repo or mayor/rig)
 	repoGit, err := m.repoBase()
 	if err != nil {
-		return nil, fmt.Errorf("finding repo base: %w", err)
+		return nil, errors.System("polecat.FindRepoBase", err).
+			WithContext("rig", m.rig.Name).
+			WithHint("Check that .repo.git or mayor/rig exists in the rig directory")
 	}
 
 	// Fetch latest from origin to ensure worktree starts from up-to-date code
@@ -387,7 +398,11 @@ func (m *Manager) AddWithOptions(name string, opts AddOptions) (*Polecat, error)
 	// git worktree add -b polecat/<name>-<timestamp> <path> <startpoint>
 	// Worktree goes in polecats/<name>/<rigname>/ for LLM ergonomics
 	if err := repoGit.WorktreeAddFromRef(clonePath, branchName, startPoint); err != nil {
-		return nil, fmt.Errorf("creating worktree from %s: %w", startPoint, err)
+		return nil, errors.Transient("polecat.CreateWorktree", err).
+			WithContext("branch", branchName).
+			WithContext("start_point", startPoint).
+			WithContext("path", clonePath).
+			WithHint("Check that the start point exists with: git branch -r")
 	}
 
 	// Ensure AGENTS.md exists - critical for polecats to "land the plane"
@@ -492,7 +507,7 @@ func (m *Manager) Remove(name string, force bool) error {
 // falls back to git check for backward compatibility.
 func (m *Manager) RemoveWithOptions(name string, force, nuclear bool) error {
 	if !m.exists(name) {
-		return ErrPolecatNotFound
+		return ErrPolecatNotFound.WithContext("name", name).WithContext("rig", m.rig.Name)
 	}
 
 	// Clone path is where the git worktree lives (new or old structure)
@@ -541,8 +556,11 @@ func (m *Manager) RemoveWithOptions(name string, force, nuclear bool) error {
 		polecatAbs, _ := filepath.Abs(polecatDir)
 
 		if strings.HasPrefix(cwdAbs, cloneAbs) || strings.HasPrefix(cwdAbs, polecatAbs) {
-			return fmt.Errorf("%w: your shell is in %s\n\nPlease cd elsewhere first, then retry:\n  cd ~/gt\n  gt polecat nuke %s/%s --force",
-				ErrShellInWorktree, cwd, m.rig.Name, name)
+			return ErrShellInWorktree.
+				WithContext("cwd", cwd).
+				WithContext("rig", m.rig.Name).
+				WithContext("polecat", name).
+				WithHint(fmt.Sprintf("Change directory first: cd ~/gt && gt polecat nuke %s/%s --force", m.rig.Name, name))
 		}
 	}
 
@@ -570,7 +588,9 @@ func (m *Manager) RemoveWithOptions(name string, force, nuclear bool) error {
 		// Fall back to direct removal if worktree removal fails
 		// (e.g., if this is an old-style clone, not a worktree)
 		if removeErr := os.RemoveAll(clonePath); removeErr != nil {
-			return fmt.Errorf("removing clone path: %w", removeErr)
+			return errors.System("polecat.RemoveClonePath", removeErr).
+				WithContext("path", clonePath).
+				WithHint("Check file system permissions")
 		}
 	} else {
 		// GT-1L3MY9: git worktree remove may leave untracked directories behind.
@@ -621,7 +641,9 @@ func (m *Manager) AllocateName() (string, error) {
 	}
 
 	if err := m.namePool.Save(); err != nil {
-		return "", fmt.Errorf("saving pool state: %w", err)
+		return "", errors.Transient("polecat.SavePoolState", err).
+			WithContext("rig", m.rig.Name).
+			WithHint("Check file system permissions for .runtime directory")
 	}
 
 	return name, nil
@@ -654,7 +676,7 @@ func (m *Manager) RepairWorktree(name string, force bool) (*Polecat, error) {
 // After repair, uses new structure: polecats/<name>/<rigname>/
 func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOptions) (*Polecat, error) {
 	if !m.exists(name) {
-		return nil, ErrPolecatNotFound
+		return nil, ErrPolecatNotFound.WithContext("name", name).WithContext("rig", m.rig.Name)
 	}
 
 	// Get the old clone path (may be old or new structure)
@@ -668,7 +690,9 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 	// Get the repo base (bare repo or mayor/rig)
 	repoGit, err := m.repoBase()
 	if err != nil {
-		return nil, fmt.Errorf("finding repo base: %w", err)
+		return nil, errors.System("polecat.FindRepoBase", err).
+			WithContext("rig", m.rig.Name).
+			WithHint("Check that .repo.git or mayor/rig exists in the rig directory")
 	}
 
 	// Check for uncommitted work unless forced
@@ -693,7 +717,9 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 	if err := repoGit.WorktreeRemove(oldClonePath, true); err != nil {
 		// Fall back to direct removal
 		if removeErr := os.RemoveAll(oldClonePath); removeErr != nil {
-			return nil, fmt.Errorf("removing old clone path: %w", removeErr)
+			return nil, errors.System("polecat.RemoveOldWorktree", removeErr).
+				WithContext("path", oldClonePath).
+				WithHint("Check file system permissions")
 		}
 	}
 
@@ -705,7 +731,9 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 
 	// Ensure polecat directory exists for new structure
 	if err := os.MkdirAll(polecatDir, 0755); err != nil {
-		return nil, fmt.Errorf("creating polecat dir: %w", err)
+		return nil, errors.System("polecat.CreateDir", err).
+			WithContext("dir", polecatDir).
+			WithHint("Check file system permissions and available disk space")
 	}
 
 	// Determine the start point for the new worktree
@@ -721,7 +749,11 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 	// and will be cleaned up by garbage collection
 	branchName := m.buildBranchName(name, opts.HookBead)
 	if err := repoGit.WorktreeAddFromRef(newClonePath, branchName, startPoint); err != nil {
-		return nil, fmt.Errorf("creating fresh worktree from %s: %w", startPoint, err)
+		return nil, errors.Transient("polecat.CreateWorktree", err).
+			WithContext("branch", branchName).
+			WithContext("start_point", startPoint).
+			WithContext("path", newClonePath).
+			WithHint("Check that the start point exists with: git branch -r")
 	}
 
 	// Ensure AGENTS.md exists - critical for polecats to "land the plane"
@@ -864,7 +896,9 @@ func (m *Manager) List() ([]*Polecat, error) {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("reading polecats dir: %w", err)
+		return nil, errors.System("polecat.ReadDir", err).
+			WithContext("dir", polecatsDir).
+			WithHint("Check file system permissions")
 	}
 
 	var polecats []*Polecat
@@ -892,7 +926,7 @@ func (m *Manager) List() ([]*Polecat, error) {
 // - If no issue assigned: StateDone (ready for cleanup - transient polecats should have work)
 func (m *Manager) Get(name string) (*Polecat, error) {
 	if !m.exists(name) {
-		return nil, ErrPolecatNotFound
+		return nil, ErrPolecatNotFound.WithContext("name", name).WithContext("rig", m.rig.Name)
 	}
 
 	return m.loadFromBeads(name)
@@ -906,7 +940,7 @@ func (m *Manager) Get(name string) (*Polecat, error) {
 // If beads is not available, this is a no-op.
 func (m *Manager) SetState(name string, state State) error {
 	if !m.exists(name) {
-		return ErrPolecatNotFound
+		return ErrPolecatNotFound.WithContext("name", name).WithContext("rig", m.rig.Name)
 	}
 
 	// Find the issue assigned to this polecat
@@ -923,7 +957,10 @@ func (m *Manager) SetState(name string, state State) error {
 		if issue != nil {
 			status := "in_progress"
 			if err := m.beads.Update(issue.ID, beads.UpdateOptions{Status: &status}); err != nil {
-				return fmt.Errorf("setting issue status: %w", err)
+				return errors.Transient("polecat.UpdateIssueStatus", err).
+					WithContext("issue_id", issue.ID).
+					WithContext("status", status).
+					WithHint("Check that beads is available with: bd status")
 			}
 		}
 	case StateDone:
@@ -931,7 +968,9 @@ func (m *Manager) SetState(name string, state State) error {
 		if issue != nil {
 			empty := ""
 			if err := m.beads.Update(issue.ID, beads.UpdateOptions{Assignee: &empty}); err != nil {
-				return fmt.Errorf("clearing assignee: %w", err)
+				return errors.Transient("polecat.ClearAssignee", err).
+					WithContext("issue_id", issue.ID).
+					WithHint("Check that beads is available with: bd status")
 			}
 		}
 	case StateStuck:
@@ -948,7 +987,7 @@ func (m *Manager) SetState(name string, state State) error {
 // AssignIssue assigns an issue to a polecat by setting the issue's assignee in beads.
 func (m *Manager) AssignIssue(name, issue string) error {
 	if !m.exists(name) {
-		return ErrPolecatNotFound
+		return ErrPolecatNotFound.WithContext("name", name).WithContext("rig", m.rig.Name)
 	}
 
 	// Set the issue's assignee to this polecat
@@ -958,7 +997,10 @@ func (m *Manager) AssignIssue(name, issue string) error {
 		Assignee: &assignee,
 		Status:   &status,
 	}); err != nil {
-		return fmt.Errorf("setting issue assignee: %w", err)
+		return errors.Transient("polecat.AssignIssue", err).
+			WithContext("issue_id", issue).
+			WithContext("polecat", name).
+			WithHint("Check that beads is available with: bd status")
 	}
 
 	return nil
@@ -970,7 +1012,7 @@ func (m *Manager) AssignIssue(name, issue string) error {
 // If beads is not available, this is a no-op.
 func (m *Manager) ClearIssue(name string) error {
 	if !m.exists(name) {
-		return ErrPolecatNotFound
+		return ErrPolecatNotFound.WithContext("name", name).WithContext("rig", m.rig.Name)
 	}
 
 	// Find the issue assigned to this polecat
@@ -991,7 +1033,9 @@ func (m *Manager) ClearIssue(name string) error {
 	if err := m.beads.Update(issue.ID, beads.UpdateOptions{
 		Assignee: &empty,
 	}); err != nil {
-		return fmt.Errorf("clearing issue assignee: %w", err)
+		return errors.Transient("polecat.ClearIssueAssignee", err).
+			WithContext("issue_id", issue.ID).
+			WithHint("Check that beads is available with: bd status")
 	}
 
 	return nil
@@ -1063,13 +1107,16 @@ func (m *Manager) setupSharedBeads(clonePath string) error {
 func (m *Manager) CleanupStaleBranches() (int, error) {
 	repoGit, err := m.repoBase()
 	if err != nil {
-		return 0, fmt.Errorf("finding repo base: %w", err)
+		return 0, errors.System("polecat.FindRepoBase", err).
+			WithContext("rig", m.rig.Name).
+			WithHint("Check that .repo.git or mayor/rig exists in the rig directory")
 	}
 
 	// List all polecat branches
 	branches, err := repoGit.ListBranches("polecat/*")
 	if err != nil {
-		return 0, fmt.Errorf("listing branches: %w", err)
+		return 0, errors.Transient("polecat.ListBranches", err).
+			WithHint("Check git repository status")
 	}
 
 	if len(branches) == 0 {
@@ -1079,7 +1126,7 @@ func (m *Manager) CleanupStaleBranches() (int, error) {
 	// Get list of existing polecats
 	polecats, err := m.List()
 	if err != nil {
-		return 0, fmt.Errorf("listing polecats: %w", err)
+		return 0, err // Already wrapped by List()
 	}
 
 	// Build set of current polecat branches (from actual polecat objects)
@@ -1127,7 +1174,7 @@ type StalenessInfo struct {
 func (m *Manager) DetectStalePolecats(threshold int) ([]*StalenessInfo, error) {
 	polecats, err := m.List()
 	if err != nil {
-		return nil, fmt.Errorf("listing polecats: %w", err)
+		return nil, err // Already wrapped by List()
 	}
 
 	if len(polecats) == 0 {
