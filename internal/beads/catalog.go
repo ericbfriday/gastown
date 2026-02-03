@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/filelock"
 )
 
 // CatalogMolecule represents a molecule template in the catalog.
@@ -113,67 +115,93 @@ func (c *MoleculeCatalog) Count() int {
 // Each line should be a JSON object with id, title, and description fields.
 // The source parameter is added to each loaded molecule.
 func (c *MoleculeCatalog) LoadFromFile(path, source string) error {
-	file, err := os.Open(path) //nolint:gosec // G304: path is from trusted molecule catalog locations
-	if err != nil {
-		return err
-	}
-	defer file.Close()
+	return filelock.WithReadLock(path, func() error {
+		file, err := os.Open(path) //nolint:gosec // G304: path is from trusted molecule catalog locations
+		if err != nil {
+			return err
+		}
+		defer file.Close()
 
-	scanner := bufio.NewScanner(file)
-	lineNum := 0
+		scanner := bufio.NewScanner(file)
+		lineNum := 0
 
-	for scanner.Scan() {
-		lineNum++
-		line := strings.TrimSpace(scanner.Text())
+		for scanner.Scan() {
+			lineNum++
+			line := strings.TrimSpace(scanner.Text())
 
-		// Skip empty lines and comments
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
-			continue
+			// Skip empty lines and comments
+			if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
+				continue
+			}
+
+			var mol CatalogMolecule
+			if err := json.Unmarshal([]byte(line), &mol); err != nil {
+				return fmt.Errorf("line %d: %w", lineNum, err)
+			}
+
+			if mol.ID == "" {
+				return fmt.Errorf("line %d: molecule missing id", lineNum)
+			}
+
+			mol.Source = source
+			c.Add(&mol)
 		}
 
-		var mol CatalogMolecule
-		if err := json.Unmarshal([]byte(line), &mol); err != nil {
-			return fmt.Errorf("line %d: %w", lineNum, err)
-		}
-
-		if mol.ID == "" {
-			return fmt.Errorf("line %d: molecule missing id", lineNum)
-		}
-
-		mol.Source = source
-		c.Add(&mol)
-	}
-
-	return scanner.Err()
+		return scanner.Err()
+	})
 }
 
 // SaveToFile writes all molecules to a JSONL file.
 // This is useful for exporting the catalog or creating template files.
 func (c *MoleculeCatalog) SaveToFile(path string) error {
-	file, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	encoder := json.NewEncoder(file)
-	for _, mol := range c.List() {
-		// Don't include source in exported file
-		exportMol := struct {
-			ID          string `json:"id"`
-			Title       string `json:"title"`
-			Description string `json:"description"`
-		}{
-			ID:          mol.ID,
-			Title:       mol.Title,
-			Description: mol.Description,
-		}
-		if err := encoder.Encode(exportMol); err != nil {
+	return filelock.WithWriteLock(path, func() error {
+		// Use atomic tmp+rename pattern
+		tmpPath := path + ".tmp"
+		file, err := os.Create(tmpPath)
+		if err != nil {
 			return err
 		}
-	}
 
-	return nil
+		// Write all molecules
+		writeErr := func() error {
+			encoder := json.NewEncoder(file)
+			for _, mol := range c.List() {
+				// Don't include source in exported file
+				exportMol := struct {
+					ID          string `json:"id"`
+					Title       string `json:"title"`
+					Description string `json:"description"`
+				}{
+					ID:          mol.ID,
+					Title:       mol.Title,
+					Description: mol.Description,
+				}
+				if err := encoder.Encode(exportMol); err != nil {
+					return err
+				}
+			}
+			return nil
+		}()
+
+		// Close file
+		closeErr := file.Close()
+		if writeErr != nil {
+			os.Remove(tmpPath)
+			return writeErr
+		}
+		if closeErr != nil {
+			os.Remove(tmpPath)
+			return closeErr
+		}
+
+		// Atomic rename
+		if err := os.Rename(tmpPath, path); err != nil {
+			os.Remove(tmpPath)
+			return err
+		}
+
+		return nil
+	})
 }
 
 // ToIssue converts a catalog molecule to an Issue struct for compatibility.

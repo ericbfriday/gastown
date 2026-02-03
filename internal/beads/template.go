@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/steveyegge/gastown/internal/filelock"
 )
 
 // EpicTemplate represents an epic template definition.
@@ -65,7 +66,11 @@ func LoadTemplate(name string) (*EpicTemplate, error) {
 	}
 
 	var tmpl EpicTemplate
-	if _, err := toml.DecodeFile(templatePath, &tmpl); err != nil {
+	err := filelock.WithReadLock(templatePath, func() error {
+		_, decodeErr := toml.DecodeFile(templatePath, &tmpl)
+		return decodeErr
+	})
+	if err != nil {
 		return nil, fmt.Errorf("parsing template %s: %w", name, err)
 	}
 
@@ -86,21 +91,32 @@ func ListTemplates() ([]string, error) {
 		return []string{}, nil
 	}
 
-	entries, err := os.ReadDir(templatesDir)
-	if err != nil {
-		return nil, fmt.Errorf("reading templates directory: %w", err)
-	}
-
+	// Use read lock with .list.lock marker for directory listing
+	listLockPath := filepath.Join(templatesDir, ".list.lock")
 	var templates []string
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
+
+	err := filelock.WithReadLock(listLockPath, func() error {
+		entries, err := os.ReadDir(templatesDir)
+		if err != nil {
+			return fmt.Errorf("reading templates directory: %w", err)
 		}
-		name := entry.Name()
-		if strings.HasSuffix(name, ".template.toml") {
-			// Strip .template.toml suffix
-			templates = append(templates, strings.TrimSuffix(name, ".template.toml"))
+
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			if strings.HasSuffix(name, ".template.toml") {
+				// Strip .template.toml suffix
+				templates = append(templates, strings.TrimSuffix(name, ".template.toml"))
+			}
 		}
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
 	}
 
 	return templates, nil

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/filelock"
 )
 
 // Route represents a prefix-to-path routing rule.
@@ -26,16 +27,30 @@ const RoutesFileName = "routes.jsonl"
 // Returns an empty slice if the file doesn't exist.
 func LoadRoutes(beadsDir string) ([]Route, error) {
 	routesPath := filepath.Join(beadsDir, RoutesFileName)
-	file, err := os.Open(routesPath)
+	var routes []Route
+
+	err := filelock.WithReadLock(routesPath, func() error {
+		return loadRoutesUnsafe(routesPath, &routes)
+	})
+
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil // No routes file is not an error
 		}
 		return nil, err
 	}
+
+	return routes, nil
+}
+
+// loadRoutesUnsafe loads routes without locking (internal helper).
+func loadRoutesUnsafe(routesPath string, routes *[]Route) error {
+	file, err := os.Open(routesPath)
+	if err != nil {
+		return err
+	}
 	defer file.Close()
 
-	var routes []Route
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -48,11 +63,11 @@ func LoadRoutes(beadsDir string) ([]Route, error) {
 			continue // Skip malformed lines
 		}
 		if route.Prefix != "" && route.Path != "" {
-			routes = append(routes, route)
+			*routes = append(*routes, route)
 		}
 	}
 
-	return routes, scanner.Err()
+	return scanner.Err()
 }
 
 // AppendRoute appends a route to routes.jsonl in the town's beads directory.
@@ -65,50 +80,59 @@ func AppendRoute(townRoot string, route Route) error {
 // AppendRouteToDir appends a route to routes.jsonl in the given beads directory.
 // If the prefix already exists, it updates the path.
 func AppendRouteToDir(beadsDir string, route Route) error {
-	// Load existing routes
-	routes, err := LoadRoutes(beadsDir)
-	if err != nil {
-		return fmt.Errorf("loading routes: %w", err)
-	}
+	routesPath := filepath.Join(beadsDir, RoutesFileName)
 
-	// Check if prefix already exists
-	found := false
-	for i, r := range routes {
-		if r.Prefix == route.Prefix {
-			routes[i].Path = route.Path
-			found = true
-			break
+	// Entire read-modify-write cycle must be atomic
+	return filelock.WithWriteLock(routesPath, func() error {
+		// Load existing routes (without lock)
+		var routes []Route
+		if err := loadRoutesUnsafe(routesPath, &routes); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("loading routes: %w", err)
 		}
-	}
 
-	if !found {
-		routes = append(routes, route)
-	}
+		// Check if prefix already exists
+		found := false
+		for i, r := range routes {
+			if r.Prefix == route.Prefix {
+				routes[i].Path = route.Path
+				found = true
+				break
+			}
+		}
 
-	// Write back
-	return WriteRoutes(beadsDir, routes)
+		if !found {
+			routes = append(routes, route)
+		}
+
+		// Write back (without lock)
+		return writeRoutesUnsafe(routesPath, routes)
+	})
 }
 
 // RemoveRoute removes a route by prefix from routes.jsonl.
 func RemoveRoute(townRoot string, prefix string) error {
 	beadsDir := filepath.Join(townRoot, ".beads")
+	routesPath := filepath.Join(beadsDir, RoutesFileName)
 
-	// Load existing routes
-	routes, err := LoadRoutes(beadsDir)
-	if err != nil {
-		return fmt.Errorf("loading routes: %w", err)
-	}
-
-	// Filter out the prefix
-	var filtered []Route
-	for _, r := range routes {
-		if r.Prefix != prefix {
-			filtered = append(filtered, r)
+	// Entire read-modify-write cycle must be atomic
+	return filelock.WithWriteLock(routesPath, func() error {
+		// Load existing routes (without lock)
+		var routes []Route
+		if err := loadRoutesUnsafe(routesPath, &routes); err != nil {
+			return fmt.Errorf("loading routes: %w", err)
 		}
-	}
 
-	// Write back
-	return WriteRoutes(beadsDir, filtered)
+		// Filter out the prefix
+		var filtered []Route
+		for _, r := range routes {
+			if r.Prefix != prefix {
+				filtered = append(filtered, r)
+			}
+		}
+
+		// Write back (without lock)
+		return writeRoutesUnsafe(routesPath, filtered)
+	})
 }
 
 // WriteRoutes writes routes to routes.jsonl, overwriting existing content.
@@ -120,23 +144,63 @@ func WriteRoutes(beadsDir string, routes []Route) error {
 
 	routesPath := filepath.Join(beadsDir, RoutesFileName)
 
-	file, err := os.Create(routesPath)
-	if err != nil {
-		return fmt.Errorf("creating routes file: %w", err)
-	}
-	defer file.Close()
+	return filelock.WithWriteLock(routesPath, func() error {
+		return writeRoutesUnsafe(routesPath, routes)
+	})
+}
 
+// writeRoutesUnsafe writes routes without locking, using atomic tmp+rename pattern.
+func writeRoutesUnsafe(routesPath string, routes []Route) error {
+	// Ensure parent directory exists
+	beadsDir := filepath.Dir(routesPath)
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		return fmt.Errorf("creating beads directory: %w", err)
+	}
+
+	// Create temp file with unique name using CreateTemp for safety
+	// Use a pattern that's recognizable but unique per call
+	tmpFile, err := os.CreateTemp(beadsDir, ".routes.jsonl.tmp.")
+	if err != nil {
+		return fmt.Errorf("creating temp routes file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+
+	// Ensure cleanup on error
+	var writeErr error
+	defer func() {
+		if writeErr != nil {
+			tmpFile.Close()
+			os.Remove(tmpPath)
+		}
+	}()
+
+	// Write all routes
 	for _, r := range routes {
 		data, err := json.Marshal(r)
 		if err != nil {
-			return fmt.Errorf("marshaling route: %w", err)
+			writeErr = fmt.Errorf("marshaling route: %w", err)
+			return writeErr
 		}
-		if _, err := file.Write(data); err != nil {
-			return fmt.Errorf("writing route: %w", err)
+		if _, err := tmpFile.Write(data); err != nil {
+			writeErr = fmt.Errorf("writing route: %w", err)
+			return writeErr
 		}
-		if _, err := file.WriteString("\n"); err != nil {
-			return fmt.Errorf("writing newline: %w", err)
+		if _, err := tmpFile.WriteString("\n"); err != nil {
+			writeErr = fmt.Errorf("writing newline: %w", err)
+			return writeErr
 		}
+	}
+
+	// Close file
+	if err := tmpFile.Close(); err != nil {
+		writeErr = fmt.Errorf("closing temp file: %w", err)
+		return writeErr
+	}
+
+	// Atomic rename
+	if err := os.Rename(tmpPath, routesPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("renaming temp file: %w", err)
 	}
 
 	return nil

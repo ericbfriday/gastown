@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/filelock"
 )
 
 // ResolveBeadsDir returns the actual beads directory, following any redirect.
@@ -29,8 +31,13 @@ func ResolveBeadsDir(workDir string) string {
 	beadsDir := filepath.Join(workDir, ".beads")
 	redirectPath := filepath.Join(beadsDir, "redirect")
 
-	// Check for redirect file
-	data, err := os.ReadFile(redirectPath) //nolint:gosec // G304: path is constructed internally
+	// Check for redirect file with read lock
+	var data []byte
+	err := filelock.WithReadLock(redirectPath, func() error {
+		var readErr error
+		data, readErr = os.ReadFile(redirectPath) //nolint:gosec // G304: path is constructed internally
+		return readErr
+	})
 	if err != nil {
 		// No redirect, use local .beads
 		return beadsDir
@@ -76,7 +83,12 @@ func resolveBeadsDirWithDepth(beadsDir string, maxDepth int) string {
 	}
 
 	redirectPath := filepath.Join(beadsDir, "redirect")
-	data, err := os.ReadFile(redirectPath) //nolint:gosec // G304: path is constructed internally
+	var data []byte
+	err := filelock.WithReadLock(redirectPath, func() error {
+		var readErr error
+		data, readErr = os.ReadFile(redirectPath) //nolint:gosec // G304: path is constructed internally
+		return readErr
+	})
 	if err != nil {
 		// No redirect, this is the final destination
 		return beadsDir
@@ -109,43 +121,47 @@ func cleanBeadsRuntimeFiles(beadsDir string) error {
 		return nil // Nothing to clean
 	}
 
-	// Runtime files/patterns that are gitignored and safe to remove
-	runtimePatterns := []string{
-		// SQLite databases
-		"*.db", "*.db-*", "*.db?*",
-		// Daemon runtime
-		"daemon.lock", "daemon.log", "daemon.pid", "bd.sock",
-		// Sync state
-		"sync-state.json", "last-touched", "metadata.json",
-		// Version tracking
-		".local_version",
-		// Redirect file (we're about to recreate it)
-		"redirect",
-		// Merge artifacts
-		"beads.base.*", "beads.left.*", "beads.right.*",
-		// JSONL files (tracked but will be redirected, safe to remove in worktrees)
-		"issues.jsonl", "interactions.jsonl",
-		// Runtime directories
-		"mq",
-	}
-
-	var firstErr error
-	for _, pattern := range runtimePatterns {
-		matches, err := filepath.Glob(filepath.Join(beadsDir, pattern))
-		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
+	// Use write lock for cleanup operation with .cleanup.lock marker
+	cleanupLockPath := filepath.Join(beadsDir, ".cleanup.lock")
+	return filelock.WithWriteLock(cleanupLockPath, func() error {
+		// Runtime files/patterns that are gitignored and safe to remove
+		runtimePatterns := []string{
+			// SQLite databases
+			"*.db", "*.db-*", "*.db?*",
+			// Daemon runtime
+			"daemon.lock", "daemon.log", "daemon.pid", "bd.sock",
+			// Sync state
+			"sync-state.json", "last-touched", "metadata.json",
+			// Version tracking
+			".local_version",
+			// Redirect file (we're about to recreate it)
+			"redirect",
+			// Merge artifacts
+			"beads.base.*", "beads.left.*", "beads.right.*",
+			// JSONL files (tracked but will be redirected, safe to remove in worktrees)
+			"issues.jsonl", "interactions.jsonl",
+			// Runtime directories
+			"mq",
 		}
-		for _, match := range matches {
-			if err := os.RemoveAll(match); err != nil && firstErr == nil {
-				firstErr = err
+
+		var firstErr error
+		for _, pattern := range runtimePatterns {
+			matches, err := filepath.Glob(filepath.Join(beadsDir, pattern))
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			for _, match := range matches {
+				if err := os.RemoveAll(match); err != nil && firstErr == nil {
+					firstErr = err
+				}
 			}
 		}
-	}
 
-	return firstErr
+		return firstErr
+	})
 }
 
 // SetupRedirect creates a .beads/redirect file for a worktree to point to the rig's shared beads.
@@ -225,8 +241,13 @@ func SetupRedirect(townRoot, worktreePath string) error {
 		// If so, redirect directly to the final destination to avoid chains.
 		// The bd CLI doesn't support redirect chains, so we must skip intermediate hops.
 		rigRedirectPath := filepath.Join(rigBeadsPath, "redirect")
-		if data, err := os.ReadFile(rigRedirectPath); err == nil {
-			rigRedirectTarget := strings.TrimSpace(string(data))
+		var rigRedirectData []byte
+		if err := filelock.WithReadLock(rigRedirectPath, func() error {
+			var readErr error
+			rigRedirectData, readErr = os.ReadFile(rigRedirectPath)
+			return readErr
+		}); err == nil {
+			rigRedirectTarget := strings.TrimSpace(string(rigRedirectData))
 			if rigRedirectTarget != "" {
 				// Rig has redirect (e.g., "mayor/rig/.beads" for tracked beads).
 				// Redirect worktree directly to the final destination.
@@ -235,11 +256,12 @@ func SetupRedirect(townRoot, worktreePath string) error {
 		}
 	}
 
-	// Create redirect file
+	// Create redirect file with write lock
 	redirectFile := filepath.Join(worktreeBeadsDir, "redirect")
-	if err := os.WriteFile(redirectFile, []byte(redirectPath+"\n"), 0644); err != nil {
-		return fmt.Errorf("creating redirect file: %w", err)
-	}
-
-	return nil
+	return filelock.WithWriteLock(redirectFile, func() error {
+		if err := os.WriteFile(redirectFile, []byte(redirectPath+"\n"), 0644); err != nil {
+			return fmt.Errorf("creating redirect file: %w", err)
+		}
+		return nil
+	})
 }

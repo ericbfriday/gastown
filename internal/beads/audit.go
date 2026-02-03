@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/steveyegge/gastown/internal/filelock"
 )
 
 // DetachAuditEntry represents an audit log entry for a detach operation.
@@ -83,16 +85,18 @@ func (b *Beads) LogDetachAudit(entry DetachAuditEntry) error {
 		return fmt.Errorf("marshaling audit entry: %w", err)
 	}
 
-	// Append to audit log file
-	f, err := os.OpenFile(auditPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600) //nolint:gosec // G304: path is constructed internally
-	if err != nil {
-		return fmt.Errorf("opening audit log: %w", err)
-	}
-	defer f.Close()
+	// Append to audit log file with write lock
+	return filelock.WithWriteLock(auditPath, func() error {
+		f, err := os.OpenFile(auditPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600) //nolint:gosec // G304: path is constructed internally
+		if err != nil {
+			return fmt.Errorf("opening audit log: %w", err)
+		}
+		defer f.Close()
 
-	if _, err := f.Write(append(data, '\n')); err != nil {
-		return fmt.Errorf("writing audit entry: %w", err)
-	}
+		if _, err := f.Write(append(data, '\n')); err != nil {
+			return fmt.Errorf("writing audit entry: %w", err)
+		}
 
-	return nil
+		return nil
+	})
 }

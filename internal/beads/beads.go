@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/filelock"
 	"github.com/steveyegge/gastown/internal/runtime"
 )
 
@@ -769,22 +770,24 @@ Before signaling completion:
 func ProvisionPrimeMD(beadsDir string) error {
 	primePath := filepath.Join(beadsDir, "PRIME.md")
 
-	// Check if already exists - don't overwrite customizations
-	if _, err := os.Stat(primePath); err == nil {
-		return nil // Already exists, don't overwrite
-	}
+	return filelock.WithWriteLock(primePath, func() error {
+		// Double-check inside lock to prevent race condition
+		if _, err := os.Stat(primePath); err == nil {
+			return nil // Already exists, don't overwrite
+		}
 
-	// Create .beads directory if it doesn't exist
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
-		return fmt.Errorf("creating beads dir: %w", err)
-	}
+		// Create .beads directory if it doesn't exist
+		if err := os.MkdirAll(beadsDir, 0755); err != nil {
+			return fmt.Errorf("creating beads dir: %w", err)
+		}
 
-	// Write PRIME.md
-	if err := os.WriteFile(primePath, []byte(primeContent), 0644); err != nil {
-		return fmt.Errorf("writing PRIME.md: %w", err)
-	}
+		// Write PRIME.md
+		if err := os.WriteFile(primePath, []byte(primeContent), 0644); err != nil {
+			return fmt.Errorf("writing PRIME.md: %w", err)
+		}
 
-	return nil
+		return nil
+	})
 }
 
 // ProvisionPrimeMDForWorktree provisions PRIME.md for a worktree by following its redirect.
