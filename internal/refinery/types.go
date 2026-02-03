@@ -5,9 +5,10 @@
 package refinery
 
 import (
-	"errors"
 	"fmt"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/errors"
 )
 
 // MergeRequest represents a branch waiting to be merged.
@@ -118,13 +119,13 @@ type QueueItem struct {
 	Age       string    `json:"age"`
 }
 
-// State transition errors.
+// State transition errors - base sentinel errors for errors.Is() compatibility.
 var (
 	// ErrInvalidTransition is returned when a state transition is not allowed.
-	ErrInvalidTransition = errors.New("invalid state transition")
+	ErrInvalidTransition = fmt.Errorf("invalid state transition")
 
 	// ErrClosedImmutable is returned when attempting to change a closed MR.
-	ErrClosedImmutable = errors.New("closed merge requests are immutable")
+	ErrClosedImmutable = fmt.Errorf("closed merge requests are immutable")
 )
 
 // ValidateTransition checks if a state transition from -> to is valid.
@@ -145,7 +146,9 @@ func ValidateTransition(from, to MRStatus) error {
 
 	// Closed is immutable - cannot transition to anything else
 	if from == MRClosed {
-		return fmt.Errorf("%w: cannot change status from closed", ErrClosedImmutable)
+		err := fmt.Errorf("%w: cannot change status from closed", ErrClosedImmutable)
+		return errors.New("refinery.transition", err).
+			WithHint("Closed merge requests are immutable. Create a new MR if needed.")
 	}
 
 	// Check valid transitions
@@ -164,7 +167,9 @@ func ValidateTransition(from, to MRStatus) error {
 		}
 	}
 
-	return fmt.Errorf("%w: %s → %s is not allowed", ErrInvalidTransition, from, to)
+	err := fmt.Errorf("%w: %s → %s is not allowed", ErrInvalidTransition, from, to)
+	return errors.New("refinery.transition", err).
+		WithHint("Valid transitions: open → in_progress, open → closed, in_progress → closed, in_progress → open")
 }
 
 // SetStatus updates the MR status after validating the transition.
@@ -183,7 +188,9 @@ func (mr *MergeRequest) SetStatus(newStatus MRStatus) error {
 func (mr *MergeRequest) Close(reason CloseReason) error {
 	// Closed MRs are immutable - cannot be closed again
 	if mr.Status == MRClosed {
-		return fmt.Errorf("%w: MR is already closed", ErrClosedImmutable)
+		err := fmt.Errorf("%w: MR is already closed", ErrClosedImmutable)
+		return errors.New("refinery.close", err).
+			WithHint("This MR is already closed and cannot be modified.")
 	}
 	if err := ValidateTransition(mr.Status, MRClosed); err != nil {
 		return err
@@ -197,8 +204,9 @@ func (mr *MergeRequest) Close(reason CloseReason) error {
 // Returns an error if the transition is not allowed.
 func (mr *MergeRequest) Reopen() error {
 	if mr.Status != MRInProgress {
-		return fmt.Errorf("%w: can only reopen from in_progress, current status is %s",
-			ErrInvalidTransition, mr.Status)
+		err := fmt.Errorf("%w: can only reopen from in_progress, current status is %s", ErrInvalidTransition, mr.Status)
+		return errors.New("refinery.reopen", err).
+			WithHint("MRs can only be reopened when they are in the in_progress state.")
 	}
 	mr.Status = MROpen
 	mr.CloseReason = "" // Clear any previous close reason
@@ -209,8 +217,9 @@ func (mr *MergeRequest) Reopen() error {
 // Returns an error if the transition is not allowed.
 func (mr *MergeRequest) Claim() error {
 	if mr.Status != MROpen {
-		return fmt.Errorf("%w: can only claim from open, current status is %s",
-			ErrInvalidTransition, mr.Status)
+		err := fmt.Errorf("%w: can only claim from open, current status is %s", ErrInvalidTransition, mr.Status)
+		return errors.New("refinery.claim", err).
+			WithHint("MRs can only be claimed when they are in the open state.")
 	}
 	mr.Status = MRInProgress
 	return nil

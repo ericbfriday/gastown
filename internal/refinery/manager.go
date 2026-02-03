@@ -1,7 +1,6 @@
 package refinery
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/errors"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -24,9 +24,12 @@ import (
 
 // Common errors
 var (
-	ErrNotRunning     = errors.New("refinery not running")
-	ErrAlreadyRunning = errors.New("refinery already running")
-	ErrNoQueue        = errors.New("no items in queue")
+	ErrNotRunning = errors.User("refinery.status", "refinery not running").
+		WithHint("Start the refinery with 'gt refinery start'")
+	ErrAlreadyRunning = errors.User("refinery.start", "refinery already running").
+		WithHint("Use 'gt refinery status' to check the current refinery state")
+	ErrNoQueue = errors.User("refinery.queue", "no items in queue").
+		WithHint("Create merge requests with 'gt mr create' or check if MRs are blocked")
 )
 
 // Manager handles refinery lifecycle and queue operations.
@@ -516,8 +519,10 @@ Thank you for your contribution!`,
 
 // Common errors for MR operations
 var (
-	ErrMRNotFound  = errors.New("merge request not found")
-	ErrMRNotFailed = errors.New("merge request has not failed")
+	ErrMRNotFound = errors.User("refinery.find", "merge request not found").
+		WithHint("Use 'gt refinery queue' to list all merge requests")
+	ErrMRNotFailed = errors.User("refinery.retry", "merge request has not failed").
+		WithHint("Only failed MRs can be retried. Check MR status with 'gt refinery status'")
 )
 
 // GetMR returns a merge request by ID.

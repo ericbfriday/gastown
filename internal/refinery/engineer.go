@@ -15,6 +15,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/convoy"
+	"github.com/steveyegge/gastown/internal/errors"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/protocol"
@@ -253,7 +254,7 @@ func (e *Engineer) ProcessMR(ctx context.Context, mr *beads.Issue) ProcessResult
 	return e.doMerge(ctx, mrFields.Branch, mrFields.Target, mrFields.SourceIssue)
 }
 
-// doMerge performs the actual git merge operation.
+// doMerge performs the actual git merge operation with retry logic for transient failures.
 // This is the core merge logic shared by ProcessMR and ProcessMRFromQueue.
 func (e *Engineer) doMerge(ctx context.Context, branch, target, sourceIssue string) ProcessResult {
 	// Step 1: Verify source branch exists locally (shared .repo.git with polecats)
@@ -262,13 +263,15 @@ func (e *Engineer) doMerge(ctx context.Context, branch, target, sourceIssue stri
 	if err != nil {
 		return ProcessResult{
 			Success: false,
-			Error:   fmt.Sprintf("failed to check branch %s: %v", branch, err),
+			Error:   errors.New("refinery.merge", errors.NewGitError("check-branch", e.workDir, branch, err)).Error(),
 		}
 	}
 	if !exists {
 		return ProcessResult{
 			Success: false,
-			Error:   fmt.Sprintf("branch %s not found locally", branch),
+			Error:   errors.User("refinery.merge", fmt.Sprintf("branch %s not found locally", branch)).
+				WithHint("The polecat may need to push the branch: 'git push origin " + branch + "'").
+				Error(),
 		}
 	}
 
@@ -277,31 +280,40 @@ func (e *Engineer) doMerge(ctx context.Context, branch, target, sourceIssue stri
 	if err := e.git.Checkout(target); err != nil {
 		return ProcessResult{
 			Success: false,
-			Error:   fmt.Sprintf("failed to checkout target %s: %v", target, err),
+			Error:   errors.New("refinery.merge", errors.NewGitError("checkout", e.workDir, target, err)).
+				WithHint("Failed to checkout target branch. Ensure git repository is clean.").
+				Error(),
 		}
 	}
 
-	// Make sure target is up to date with origin
-	if err := e.git.Pull("origin", target); err != nil {
+	// Make sure target is up to date with origin - use retry for network operations
+	err = errors.WithNetworkRetry(func() error {
+		return e.git.Pull("origin", target)
+	})
+	if err != nil {
 		// Pull might fail if nothing to pull, that's ok
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: pull from origin/%s: %v (continuing)\n", target, err)
 	}
 
-	// Step 3: Check for merge conflicts (using local branch)
+	// Step 3: Check for merge conflicts
 	_, _ = fmt.Fprintf(e.output, "[Engineer] Checking for conflicts...\n")
 	conflicts, err := e.git.CheckConflicts(branch, target)
 	if err != nil {
 		return ProcessResult{
 			Success:  false,
 			Conflict: true,
-			Error:    fmt.Sprintf("conflict check failed: %v", err),
+			Error:    errors.New("refinery.merge", errors.NewGitError("check-conflicts", e.workDir, branch, err)).
+				WithHint("Failed to check for conflicts. The branch may need rebasing.").
+				Error(),
 		}
 	}
 	if len(conflicts) > 0 {
 		return ProcessResult{
 			Success:  false,
 			Conflict: true,
-			Error:    fmt.Sprintf("merge conflicts in: %v", conflicts),
+			Error:    errors.User("refinery.merge", fmt.Sprintf("merge conflicts in: %v", conflicts)).
+				WithHint("Rebase the branch to resolve conflicts: 'git rebase origin/" + target + "'").
+				Error(),
 		}
 	}
 
@@ -359,12 +371,17 @@ func (e *Engineer) doMerge(ctx context.Context, branch, target, sourceIssue stri
 		}
 	}
 
-	// Step 7: Push to origin
+	// Step 7: Push to origin with retry for transient network failures
 	_, _ = fmt.Fprintf(e.output, "[Engineer] Pushing to origin/%s...\n", target)
-	if err := e.git.Push("origin", target, false); err != nil {
+	err = errors.WithNetworkRetry(func() error {
+		return e.git.Push("origin", target, false)
+	})
+	if err != nil {
 		return ProcessResult{
 			Success: false,
-			Error:   fmt.Sprintf("failed to push to origin: %v", err),
+			Error:   errors.Transient("refinery.merge", errors.NewGitError("push", e.workDir, target, err)).
+				WithHint("Push failed. Check network connection and remote permissions.").
+				Error(),
 		}
 	}
 
@@ -750,7 +767,8 @@ The Refinery will automatically retry the merge after you force-push.`,
 		Actor:       e.rig.Name + "/refinery",
 	})
 	if err != nil {
-		return "", fmt.Errorf("creating conflict resolution task: %w", err)
+		return "", errors.New("refinery.conflict", errors.NewBeadsError("create", "", err)).
+			WithHint("Failed to create conflict resolution task. Check beads database permissions.")
 	}
 
 	// The conflict task's ID is returned so the MR can be blocked on it.
@@ -773,17 +791,18 @@ func (e *Engineer) IsBeadOpen(beadID string) (bool, error) {
 	return issue.Status != "closed", nil
 }
 
-// ListReadyMRs returns MRs that are ready for processing:
-// - Not claimed by another worker (checked via assignee field)
-// - Not blocked by an open task (handled by bd ready)
-// Sorted by priority (highest first).
-//
-// This queries beads for merge-request wisps.
+// ListReadyMRs returns MRs that are ready for processing with retry logic for transient failures.
 func (e *Engineer) ListReadyMRs() ([]*MRInfo, error) {
-	// Query beads for ready merge-request issues
-	issues, err := e.beads.ReadyWithType("merge-request")
+	// Query beads for ready merge-request issues with retry
+	var issues []*beads.Issue
+	err := errors.WithRetry(func() error {
+		var queryErr error
+		issues, queryErr = e.beads.ReadyWithType("merge-request")
+		return queryErr
+	})
 	if err != nil {
-		return nil, fmt.Errorf("querying beads for merge-requests: %w", err)
+		return nil, errors.New("refinery.list", errors.NewBeadsError("list", "", err)).
+			WithHint("Failed to query ready MRs. Ensure beads is initialized: 'bd init'")
 	}
 
 	// Convert beads issues to MRInfo
@@ -842,19 +861,22 @@ func (e *Engineer) ListReadyMRs() ([]*MRInfo, error) {
 	return mrs, nil
 }
 
-// ListBlockedMRs returns MRs that are blocked by open tasks.
-// Useful for monitoring/reporting.
-//
-// This queries beads for blocked merge-request issues.
+// ListBlockedMRs returns MRs that are blocked by open tasks with retry logic.
 func (e *Engineer) ListBlockedMRs() ([]*MRInfo, error) {
-	// Query all merge-request issues (both ready and blocked)
-	issues, err := e.beads.List(beads.ListOptions{
-		Status:   "open",
-		Label:    "gt:merge-request",
-		Priority: -1, // No priority filter
+	// Query all merge-request issues (both ready and blocked) with retry
+	var issues []*beads.Issue
+	err := errors.WithRetry(func() error {
+		var queryErr error
+		issues, queryErr = e.beads.List(beads.ListOptions{
+			Status:   "open",
+			Label:    "gt:merge-request",
+			Priority: -1, // No priority filter
+		})
+		return queryErr
 	})
 	if err != nil {
-		return nil, fmt.Errorf("querying beads for merge-requests: %w", err)
+		return nil, errors.New("refinery.list", errors.NewBeadsError("list", "", err)).
+			WithHint("Failed to query blocked MRs. Ensure beads is initialized: 'bd init'")
 	}
 
 	// Filter for blocked issues (those with open blockers)
