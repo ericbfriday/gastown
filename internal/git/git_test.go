@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/errors"
 )
 
 func initTestRepo(t *testing.T) string {
@@ -215,16 +217,27 @@ func TestNotARepo(t *testing.T) {
 	g := NewGit(dir)
 
 	_, err := g.CurrentBranch()
-	// ZFC: Check for GitError with raw stderr for agent observation.
-	// Agents decide what "not a git repository" means, not Go code.
-	gitErr, ok := err.(*GitError)
-	if !ok {
-		t.Errorf("expected GitError, got %T: %v", err, err)
+	// Now returns *errors.Error with GitError wrapped inside
+	// Check that we get a permanent error with proper categorization
+	if err == nil {
+		t.Fatal("expected error for non-repo, got nil")
+	}
+
+	// The error should be categorized as permanent (not a repo is permanent)
+	var enhancedErr *errors.Error
+	if !errors.As(err, &enhancedErr) {
+		t.Errorf("expected *errors.Error, got %T: %v", err, err)
 		return
 	}
-	// Verify raw stderr is available for agent observation
-	if gitErr.Stderr == "" {
-		t.Errorf("expected GitError with Stderr, got empty stderr")
+
+	// Should be permanent since "not a repo" can't be fixed by retry
+	if enhancedErr.Category != errors.CategoryPermanent {
+		t.Errorf("expected CategoryPermanent, got %v", enhancedErr.Category)
+	}
+
+	// Should have stderr context
+	if enhancedErr.Context == nil || enhancedErr.Context["stderr"] == "" {
+		t.Errorf("expected stderr in context, got %v", enhancedErr.Context)
 	}
 }
 

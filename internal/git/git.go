@@ -9,12 +9,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/errors"
 )
 
 // GitError contains raw output from a git command for agent observation.
 // ZFC: Callers observe the raw output and decide what to do.
 // The error interface methods provide human-readable messages, but agents
 // should use Stdout/Stderr for programmatic observation.
+// Preserved for backward compatibility - wraps errors.Error internally.
 type GitError struct {
 	Command string // The git command that failed (e.g., "merge", "push")
 	Args    []string
@@ -33,6 +36,25 @@ func (e *GitError) Error() string {
 func (e *GitError) Unwrap() error {
 	return e.Err
 }
+
+// Common git error codes for programmatic handling
+const (
+	ErrCodeGitNotInstalled     = "git.NotInstalled"
+	ErrCodeNotARepo            = "git.NotARepo"
+	ErrCodeNoCommits           = "git.NoCommits"
+	ErrCodeInvalidRef          = "git.InvalidRef"
+	ErrCodeMergeConflict       = "git.MergeConflict"
+	ErrCodeUncommittedChanges  = "git.UncommittedChanges"
+	ErrCodeBranchNotFound      = "git.BranchNotFound"
+	ErrCodeRemoteNotFound      = "git.RemoteNotFound"
+	ErrCodeNetworkError        = "git.NetworkError"
+	ErrCodeAuthenticationError = "git.AuthenticationError"
+	ErrCodePermissionDenied    = "git.PermissionDenied"
+	ErrCodeAlreadyExists       = "git.AlreadyExists"
+	ErrCodeDetachedHead        = "git.DetachedHead"
+	ErrCodeRebaseInProgress    = "git.RebaseInProgress"
+	ErrCodeMergeInProgress     = "git.MergeInProgress"
+)
 
 // moveDir moves a directory from src to dest. It first tries os.Rename for
 // efficiency, but falls back to copy+delete if src and dest are on different
@@ -162,9 +184,8 @@ func (g *Git) run(args ...string) (string, error) {
 	return strings.TrimSpace(stdout.String()), nil
 }
 
-// wrapError wraps git errors with context.
-// ZFC: Returns GitError with raw output for agent observation.
-// Does not detect or interpret error types - agents should observe and decide.
+// wrapError wraps git errors with comprehensive error handling.
+// Categorizes errors and provides recovery hints based on git output.
 func (g *Git) wrapError(err error, stdout, stderr string, args []string) error {
 	stdout = strings.TrimSpace(stdout)
 	stderr = strings.TrimSpace(stderr)
@@ -181,44 +202,211 @@ func (g *Git) wrapError(err error, stdout, stderr string, args []string) error {
 		command = args[0]
 	}
 
-	return &GitError{
+	// Build base operation name
+	op := "git." + command
+
+	// Preserve legacy GitError for backward compatibility
+	gitErr := &GitError{
 		Command: command,
 		Args:    args,
 		Stdout:  stdout,
 		Stderr:  stderr,
 		Err:     err,
 	}
+
+	// Categorize error based on stderr patterns
+	wrappedErr := categorizeGitError(op, gitErr, stderr, command)
+
+	// Add context from git operation
+	if wrappedErr != nil {
+		if g.workDir != "" {
+			wrappedErr.WithContext("repo_path", g.workDir)
+		}
+		if command != "" {
+			wrappedErr.WithContext("command", "git "+strings.Join(args, " "))
+		}
+		if stderr != "" {
+			wrappedErr.WithContext("stderr", stderr)
+		}
+	}
+
+	return wrappedErr
 }
 
-// Clone clones a repository to the destination.
+// categorizeGitError analyzes git stderr and categorizes the error appropriately.
+func categorizeGitError(op string, gitErr *GitError, stderr, command string) *errors.Error {
+	stderrLower := strings.ToLower(stderr)
+
+	// System errors (git not installed, permissions)
+	if strings.Contains(stderrLower, "git: command not found") ||
+		strings.Contains(stderrLower, "not recognized as an internal or external command") {
+		return errors.System(op, gitErr).
+			WithHint("Git is not installed or not in PATH. Install git from https://git-scm.com/ and ensure it's in your system PATH.")
+	}
+
+	if strings.Contains(stderrLower, "permission denied") {
+		hint := "Permission denied. Check file/directory permissions or SSH key configuration."
+		if command == "push" || command == "pull" || command == "fetch" || command == "clone" {
+			hint = "Permission denied. For SSH: verify your SSH keys are configured correctly (ssh-add -l). For HTTPS: check your credentials or personal access token."
+		}
+		return errors.System(op, gitErr).
+			WithHint(hint)
+	}
+
+	// Permanent errors (not a repo, invalid ref, no commits)
+	if strings.Contains(stderrLower, "not a git repository") {
+		return errors.Permanent(op, gitErr).
+			WithHint("Not a git repository. Initialize a repository with 'git init' or clone an existing one with 'git clone <url>'.")
+	}
+
+	if strings.Contains(stderrLower, "does not have any commits yet") ||
+		strings.Contains(stderrLower, "no commits yet") {
+		return errors.Permanent(op, gitErr).
+			WithHint("Repository has no commits. Create an initial commit with 'git add . && git commit -m \"Initial commit\"'.")
+	}
+
+	if strings.Contains(stderrLower, "unknown revision") ||
+		strings.Contains(stderrLower, "invalid revision") ||
+		strings.Contains(stderrLower, "bad revision") {
+		return errors.Permanent(op, gitErr).
+			WithHint("Invalid git reference. Check that the branch, tag, or commit SHA exists with 'git branch -a' or 'git tag'.")
+	}
+
+	if strings.Contains(stderrLower, "reference is not a tree") {
+		return errors.Permanent(op, gitErr).
+			WithHint("Reference is not a valid tree object. Ensure you're referencing a commit, branch, or tag.")
+	}
+
+	// User errors (uncommitted changes, merge conflicts, branch issues)
+	if strings.Contains(stderrLower, "please commit your changes") ||
+		strings.Contains(stderrLower, "your local changes to the following files would be overwritten") ||
+		strings.Contains(stderrLower, "uncommitted changes") {
+		return errors.User(op, "uncommitted changes would be overwritten").
+			WithHint("Commit or stash your changes before proceeding: 'git add . && git commit -m \"message\"' or 'git stash'.")
+	}
+
+	if strings.Contains(stderrLower, "conflict") ||
+		strings.Contains(stderrLower, "merge conflict") {
+		return errors.User(op, "merge conflict detected").
+			WithHint("Resolve conflicts manually:\n1. Edit conflicted files (look for <<<<<<< markers)\n2. Stage resolved files: git add <file>\n3. Complete merge: git commit\nOr abort: git merge --abort")
+	}
+
+	if strings.Contains(stderrLower, "already exists") ||
+		strings.Contains(stderrLower, "branch named") {
+		return errors.User(op, "branch or resource already exists").
+			WithHint("The branch or resource already exists. Use 'git branch -a' to list branches, or use --force to overwrite.")
+	}
+
+	if strings.Contains(stderrLower, "not a valid branch") ||
+		strings.Contains(stderrLower, "branch not found") {
+		return errors.User(op, "branch not found").
+			WithHint("Branch does not exist. List available branches with 'git branch -a'.")
+	}
+
+	if strings.Contains(stderrLower, "detached head") {
+		return errors.User(op, "repository is in detached HEAD state").
+			WithHint("Create a new branch from this state with 'git checkout -b <new-branch-name>' or return to a branch with 'git checkout <branch-name>'.")
+	}
+
+	if strings.Contains(stderrLower, "rebase in progress") {
+		return errors.User(op, "rebase in progress").
+			WithHint("Complete the rebase with 'git rebase --continue' after resolving conflicts, or abort with 'git rebase --abort'.")
+	}
+
+	if strings.Contains(stderrLower, "merge in progress") {
+		return errors.User(op, "merge in progress").
+			WithHint("Complete the merge with 'git commit' after resolving conflicts, or abort with 'git merge --abort'.")
+	}
+
+	// Transient errors (network issues, connection failures)
+	if strings.Contains(stderrLower, "could not resolve host") ||
+		strings.Contains(stderrLower, "failed to connect") ||
+		strings.Contains(stderrLower, "network is unreachable") ||
+		strings.Contains(stderrLower, "connection timed out") ||
+		strings.Contains(stderrLower, "temporary failure") ||
+		strings.Contains(stderrLower, "connection refused") {
+		return errors.Transient(op, gitErr).
+			WithHint("Network error. Check your internet connection and try again. If using SSH, verify the remote host is accessible.")
+	}
+
+	if strings.Contains(stderrLower, "authentication failed") ||
+		strings.Contains(stderrLower, "could not read username") ||
+		strings.Contains(stderrLower, "could not read password") {
+		return errors.Transient(op, gitErr).
+			WithHint("Authentication failed. For HTTPS: verify your username and personal access token. For SSH: check your SSH keys with 'ssh -T git@github.com'.")
+	}
+
+	if strings.Contains(stderrLower, "remote end hung up") ||
+		strings.Contains(stderrLower, "early eof") ||
+		strings.Contains(stderrLower, "rpc failed") {
+		return errors.Transient(op, gitErr).
+			WithHint("Connection interrupted. This may be due to network issues or large repository size. Try again or use 'git config http.postBuffer 524288000' to increase buffer size.")
+	}
+
+	if strings.Contains(stderrLower, "repository not found") ||
+		strings.Contains(stderrLower, "remote not found") {
+		// Could be transient (temporary server issue) or permanent (wrong URL)
+		// Default to transient with retry hint
+		return errors.Transient(op, gitErr).
+			WithHint("Repository or remote not found. Verify the URL is correct with 'git remote -v'. If the URL is correct, the server may be temporarily unavailable.")
+	}
+
+	// Default: wrap as system error for unknown issues
+	return errors.System(op, gitErr).
+		WithHint("Git operation failed. Check the command output for details or run 'git status' to see repository state.")
+}
+
+// Clone clones a repository to the destination with network retry logic.
 func (g *Git) Clone(url, dest string) error {
 	// Ensure destination directory's parent exists
 	destParent := filepath.Dir(dest)
 	if err := os.MkdirAll(destParent, 0755); err != nil {
-		return fmt.Errorf("creating destination parent: %w", err)
+		return errors.System("git.Clone", err).
+			WithContext("dest", dest).
+			WithHint("Failed to create destination directory. Check filesystem permissions.")
 	}
-	// Run clone from a temporary directory to completely isolate from any
-	// git repo at the process cwd. Then move the result to the destination.
-	tmpDir, err := os.MkdirTemp("", "gt-clone-*")
+
+	// Run clone with network retry logic
+	err := errors.Retry(func() error {
+		// Run clone from a temporary directory to completely isolate from any
+		// git repo at the process cwd. Then move the result to the destination.
+		tmpDir, err := os.MkdirTemp("", "gt-clone-*")
+		if err != nil {
+			return errors.System("git.Clone", err).
+				WithHint("Failed to create temporary directory. Check system temporary directory permissions.")
+		}
+		defer func() { _ = os.RemoveAll(tmpDir) }()
+
+		tmpDest := filepath.Join(tmpDir, filepath.Base(dest))
+		cmd := exec.Command("git", "clone", url, tmpDest)
+		cmd.Dir = tmpDir
+		cmd.Env = append(os.Environ(), "GIT_CEILING_DIRECTORIES="+tmpDir)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			wrappedErr := g.wrapError(err, stdout.String(), stderr.String(), []string{"clone", url})
+			if wrappedErr != nil {
+				// Add remote URL context
+				if e, ok := wrappedErr.(*errors.Error); ok {
+					e.WithContext("remote_url", url)
+				}
+			}
+			return wrappedErr
+		}
+
+		// Move to final destination (handles cross-filesystem moves)
+		if err := moveDir(tmpDest, dest); err != nil {
+			return errors.System("git.Clone", err).
+				WithContext("dest", dest).
+				WithHint("Failed to move cloned repository to destination. Check filesystem permissions and available disk space.")
+		}
+
+		return nil
+	}, errors.NetworkRetryConfig())
+
 	if err != nil {
-		return fmt.Errorf("creating temp dir: %w", err)
-	}
-	defer func() { _ = os.RemoveAll(tmpDir) }()
-
-	tmpDest := filepath.Join(tmpDir, filepath.Base(dest))
-	cmd := exec.Command("git", "clone", url, tmpDest)
-	cmd.Dir = tmpDir
-	cmd.Env = append(os.Environ(), "GIT_CEILING_DIRECTORIES="+tmpDir)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return g.wrapError(err, stdout.String(), stderr.String(), []string{"clone", url})
-	}
-
-	// Move to final destination (handles cross-filesystem moves)
-	if err := moveDir(tmpDest, dest); err != nil {
-		return fmt.Errorf("moving clone to destination: %w", err)
+		return err
 	}
 
 	// Configure hooks path for Gas Town clones
@@ -230,35 +418,57 @@ func (g *Git) Clone(url, dest string) error {
 }
 
 // CloneWithReference clones a repository using a local repo as an object reference.
-// This saves disk by sharing objects without changing remotes.
+// This saves disk by sharing objects without changing remotes. Uses network retry logic.
 func (g *Git) CloneWithReference(url, dest, reference string) error {
 	// Ensure destination directory's parent exists
 	destParent := filepath.Dir(dest)
 	if err := os.MkdirAll(destParent, 0755); err != nil {
-		return fmt.Errorf("creating destination parent: %w", err)
+		return errors.System("git.CloneWithReference", err).
+			WithContext("dest", dest).
+			WithHint("Failed to create destination directory. Check filesystem permissions.")
 	}
-	// Run clone from a temporary directory to completely isolate from any
-	// git repo at the process cwd. Then move the result to the destination.
-	tmpDir, err := os.MkdirTemp("", "gt-clone-*")
+
+	// Run clone with network retry logic
+	err := errors.Retry(func() error {
+		// Run clone from a temporary directory to completely isolate from any
+		// git repo at the process cwd. Then move the result to the destination.
+		tmpDir, err := os.MkdirTemp("", "gt-clone-*")
+		if err != nil {
+			return errors.System("git.CloneWithReference", err).
+				WithHint("Failed to create temporary directory. Check system temporary directory permissions.")
+		}
+		defer func() { _ = os.RemoveAll(tmpDir) }()
+
+		tmpDest := filepath.Join(tmpDir, filepath.Base(dest))
+		cmd := exec.Command("git", "clone", "--reference-if-able", reference, url, tmpDest)
+		cmd.Dir = tmpDir
+		cmd.Env = append(os.Environ(), "GIT_CEILING_DIRECTORIES="+tmpDir)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			wrappedErr := g.wrapError(err, stdout.String(), stderr.String(), []string{"clone", "--reference-if-able", url})
+			if wrappedErr != nil {
+				if e, ok := wrappedErr.(*errors.Error); ok {
+					e.WithContext("remote_url", url).
+						WithContext("reference", reference)
+				}
+			}
+			return wrappedErr
+		}
+
+		// Move to final destination (handles cross-filesystem moves)
+		if err := moveDir(tmpDest, dest); err != nil {
+			return errors.System("git.CloneWithReference", err).
+				WithContext("dest", dest).
+				WithHint("Failed to move cloned repository to destination. Check filesystem permissions and available disk space.")
+		}
+
+		return nil
+	}, errors.NetworkRetryConfig())
+
 	if err != nil {
-		return fmt.Errorf("creating temp dir: %w", err)
-	}
-	defer func() { _ = os.RemoveAll(tmpDir) }()
-
-	tmpDest := filepath.Join(tmpDir, filepath.Base(dest))
-	cmd := exec.Command("git", "clone", "--reference-if-able", reference, url, tmpDest)
-	cmd.Dir = tmpDir
-	cmd.Env = append(os.Environ(), "GIT_CEILING_DIRECTORIES="+tmpDir)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return g.wrapError(err, stdout.String(), stderr.String(), []string{"clone", "--reference-if-able", url})
-	}
-
-	// Move to final destination (handles cross-filesystem moves)
-	if err := moveDir(tmpDest, dest); err != nil {
-		return fmt.Errorf("moving clone to destination: %w", err)
+		return err
 	}
 
 	// Configure hooks path for Gas Town clones
@@ -271,34 +481,56 @@ func (g *Git) CloneWithReference(url, dest, reference string) error {
 
 // CloneBare clones a repository as a bare repo (no working directory).
 // This is used for the shared repo architecture where all worktrees share a single git database.
+// Uses network retry logic for reliable cloning.
 func (g *Git) CloneBare(url, dest string) error {
 	// Ensure destination directory's parent exists
 	destParent := filepath.Dir(dest)
 	if err := os.MkdirAll(destParent, 0755); err != nil {
-		return fmt.Errorf("creating destination parent: %w", err)
+		return errors.System("git.CloneBare", err).
+			WithContext("dest", dest).
+			WithHint("Failed to create destination directory. Check filesystem permissions.")
 	}
-	// Run clone from a temporary directory to completely isolate from any
-	// git repo at the process cwd. Then move the result to the destination.
-	tmpDir, err := os.MkdirTemp("", "gt-clone-*")
+
+	// Run clone with network retry logic
+	err := errors.Retry(func() error {
+		// Run clone from a temporary directory to completely isolate from any
+		// git repo at the process cwd. Then move the result to the destination.
+		tmpDir, err := os.MkdirTemp("", "gt-clone-*")
+		if err != nil {
+			return errors.System("git.CloneBare", err).
+				WithHint("Failed to create temporary directory. Check system temporary directory permissions.")
+		}
+		defer func() { _ = os.RemoveAll(tmpDir) }()
+
+		tmpDest := filepath.Join(tmpDir, filepath.Base(dest))
+		cmd := exec.Command("git", "clone", "--bare", url, tmpDest)
+		cmd.Dir = tmpDir
+		cmd.Env = append(os.Environ(), "GIT_CEILING_DIRECTORIES="+tmpDir)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			wrappedErr := g.wrapError(err, stdout.String(), stderr.String(), []string{"clone", "--bare", url})
+			if wrappedErr != nil {
+				if e, ok := wrappedErr.(*errors.Error); ok {
+					e.WithContext("remote_url", url)
+				}
+			}
+			return wrappedErr
+		}
+
+		// Move to final destination (handles cross-filesystem moves)
+		if err := moveDir(tmpDest, dest); err != nil {
+			return errors.System("git.CloneBare", err).
+				WithContext("dest", dest).
+				WithHint("Failed to move cloned repository to destination. Check filesystem permissions and available disk space.")
+		}
+
+		return nil
+	}, errors.NetworkRetryConfig())
+
 	if err != nil {
-		return fmt.Errorf("creating temp dir: %w", err)
-	}
-	defer func() { _ = os.RemoveAll(tmpDir) }()
-
-	tmpDest := filepath.Join(tmpDir, filepath.Base(dest))
-	cmd := exec.Command("git", "clone", "--bare", url, tmpDest)
-	cmd.Dir = tmpDir
-	cmd.Env = append(os.Environ(), "GIT_CEILING_DIRECTORIES="+tmpDir)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return g.wrapError(err, stdout.String(), stderr.String(), []string{"clone", "--bare", url})
-	}
-
-	// Move to final destination (handles cross-filesystem moves)
-	if err := moveDir(tmpDest, dest); err != nil {
-		return fmt.Errorf("moving clone to destination: %w", err)
+		return err
 	}
 
 	// Configure refspec so worktrees can fetch and see origin/* refs
@@ -319,7 +551,10 @@ func configureHooksPath(repoPath string) error {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("configuring hooks path: %s", strings.TrimSpace(stderr.String()))
+		return errors.System("git.configureHooksPath", err).
+			WithContext("repo_path", repoPath).
+			WithContext("stderr", strings.TrimSpace(stderr.String())).
+			WithHint("Failed to configure git hooks path. Ensure the repository is valid and the .githooks directory is accessible.")
 	}
 	return nil
 }
@@ -340,47 +575,79 @@ func configureRefspec(repoPath string) error {
 	configCmd := exec.Command("git", "--git-dir", gitDir, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
 	configCmd.Stderr = &stderr
 	if err := configCmd.Run(); err != nil {
-		return fmt.Errorf("configuring refspec: %s", strings.TrimSpace(stderr.String()))
+		return errors.System("git.configureRefspec", err).
+			WithContext("repo_path", repoPath).
+			WithContext("stderr", strings.TrimSpace(stderr.String())).
+			WithHint("Failed to configure git refspec. Ensure the repository is valid and accessible.")
 	}
 
-	fetchCmd := exec.Command("git", "--git-dir", gitDir, "fetch", "origin")
-	fetchCmd.Stderr = &stderr
-	if err := fetchCmd.Run(); err != nil {
-		return fmt.Errorf("fetching origin: %s", strings.TrimSpace(stderr.String()))
-	}
-
-	return nil
+	// Use network retry for fetch operation
+	return errors.Retry(func() error {
+		fetchCmd := exec.Command("git", "--git-dir", gitDir, "fetch", "origin")
+		var fetchStderr bytes.Buffer
+		fetchCmd.Stderr = &fetchStderr
+		if err := fetchCmd.Run(); err != nil {
+			return errors.Transient("git.configureRefspec", err).
+				WithContext("repo_path", repoPath).
+				WithContext("stderr", strings.TrimSpace(fetchStderr.String())).
+				WithHint("Failed to fetch origin refs. Check network connectivity and remote repository accessibility.")
+		}
+		return nil
+	}, errors.NetworkRetryConfig())
 }
 
 // CloneBareWithReference clones a bare repository using a local repo as an object reference.
+// Uses network retry logic for reliable cloning.
 func (g *Git) CloneBareWithReference(url, dest, reference string) error {
 	// Ensure destination directory's parent exists
 	destParent := filepath.Dir(dest)
 	if err := os.MkdirAll(destParent, 0755); err != nil {
-		return fmt.Errorf("creating destination parent: %w", err)
+		return errors.System("git.CloneBareWithReference", err).
+			WithContext("dest", dest).
+			WithHint("Failed to create destination directory. Check filesystem permissions.")
 	}
-	// Run clone from a temporary directory to completely isolate from any
-	// git repo at the process cwd. Then move the result to the destination.
-	tmpDir, err := os.MkdirTemp("", "gt-clone-*")
+
+	// Run clone with network retry logic
+	err := errors.Retry(func() error {
+		// Run clone from a temporary directory to completely isolate from any
+		// git repo at the process cwd. Then move the result to the destination.
+		tmpDir, err := os.MkdirTemp("", "gt-clone-*")
+		if err != nil {
+			return errors.System("git.CloneBareWithReference", err).
+				WithHint("Failed to create temporary directory. Check system temporary directory permissions.")
+		}
+		defer func() { _ = os.RemoveAll(tmpDir) }()
+
+		tmpDest := filepath.Join(tmpDir, filepath.Base(dest))
+		cmd := exec.Command("git", "clone", "--bare", "--reference-if-able", reference, url, tmpDest)
+		cmd.Dir = tmpDir
+		cmd.Env = append(os.Environ(), "GIT_CEILING_DIRECTORIES="+tmpDir)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			wrappedErr := g.wrapError(err, stdout.String(), stderr.String(), []string{"clone", "--bare", "--reference-if-able", url})
+			if wrappedErr != nil {
+				if e, ok := wrappedErr.(*errors.Error); ok {
+					e.WithContext("remote_url", url).
+						WithContext("reference", reference)
+				}
+			}
+			return wrappedErr
+		}
+
+		// Move to final destination (handles cross-filesystem moves)
+		if err := moveDir(tmpDest, dest); err != nil {
+			return errors.System("git.CloneBareWithReference", err).
+				WithContext("dest", dest).
+				WithHint("Failed to move cloned repository to destination. Check filesystem permissions and available disk space.")
+		}
+
+		return nil
+	}, errors.NetworkRetryConfig())
+
 	if err != nil {
-		return fmt.Errorf("creating temp dir: %w", err)
-	}
-	defer func() { _ = os.RemoveAll(tmpDir) }()
-
-	tmpDest := filepath.Join(tmpDir, filepath.Base(dest))
-	cmd := exec.Command("git", "clone", "--bare", "--reference-if-able", reference, url, tmpDest)
-	cmd.Dir = tmpDir
-	cmd.Env = append(os.Environ(), "GIT_CEILING_DIRECTORIES="+tmpDir)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return g.wrapError(err, stdout.String(), stderr.String(), []string{"clone", "--bare", "--reference-if-able", url})
-	}
-
-	// Move to final destination (handles cross-filesystem moves)
-	if err := moveDir(tmpDest, dest); err != nil {
-		return fmt.Errorf("moving clone to destination: %w", err)
+		return err
 	}
 
 	// Configure refspec so worktrees can fetch and see origin/* refs
@@ -393,32 +660,62 @@ func (g *Git) Checkout(ref string) error {
 	return err
 }
 
-// Fetch fetches from the remote.
+// Fetch fetches from the remote with network retry logic.
 func (g *Git) Fetch(remote string) error {
-	_, err := g.run("fetch", remote)
-	return err
+	return errors.Retry(func() error {
+		_, err := g.run("fetch", remote)
+		return err
+	}, errors.NetworkRetryConfig())
 }
 
-// FetchBranch fetches a specific branch from the remote.
+// FetchBranch fetches a specific branch from the remote with network retry logic.
 func (g *Git) FetchBranch(remote, branch string) error {
-	_, err := g.run("fetch", remote, branch)
-	return err
+	return errors.Retry(func() error {
+		_, err := g.run("fetch", remote, branch)
+		if err != nil {
+			// Add branch context to error
+			if e, ok := err.(*errors.Error); ok {
+				e.WithContext("branch", branch).
+					WithContext("remote", remote)
+			}
+		}
+		return err
+	}, errors.NetworkRetryConfig())
 }
 
-// Pull pulls from the remote branch.
+// Pull pulls from the remote branch with network retry logic.
 func (g *Git) Pull(remote, branch string) error {
-	_, err := g.run("pull", remote, branch)
-	return err
+	return errors.Retry(func() error {
+		_, err := g.run("pull", remote, branch)
+		if err != nil {
+			// Add branch and remote context to error
+			if e, ok := err.(*errors.Error); ok {
+				e.WithContext("branch", branch).
+					WithContext("remote", remote)
+			}
+		}
+		return err
+	}, errors.NetworkRetryConfig())
 }
 
-// Push pushes to the remote branch.
+// Push pushes to the remote branch with network retry logic.
 func (g *Git) Push(remote, branch string, force bool) error {
-	args := []string{"push", remote, branch}
-	if force {
-		args = append(args, "--force")
-	}
-	_, err := g.run(args...)
-	return err
+	return errors.Retry(func() error {
+		args := []string{"push", remote, branch}
+		if force {
+			args = append(args, "--force")
+		}
+		_, err := g.run(args...)
+		if err != nil {
+			// Add push context to error
+			if e, ok := err.(*errors.Error); ok {
+				e.WithContext("branch", branch).
+					WithContext("remote", remote).
+					WithContext("force", force)
+			}
+		}
+		return err
+	}, errors.NetworkRetryConfig())
 }
 
 // Add stages files for commit.
@@ -856,7 +1153,10 @@ func ConfigureSparseCheckout(repoPath string) error {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("enabling sparse checkout: %s", strings.TrimSpace(stderr.String()))
+		return errors.System("git.ConfigureSparseCheckout", err).
+			WithContext("repo_path", repoPath).
+			WithContext("stderr", strings.TrimSpace(stderr.String())).
+			WithHint("Failed to enable sparse checkout. Ensure the repository is valid and accessible.")
 	}
 
 	// Get git dir for this repo/worktree
@@ -866,7 +1166,10 @@ func ConfigureSparseCheckout(repoPath string) error {
 	stderr.Reset()
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("getting git dir: %s", strings.TrimSpace(stderr.String()))
+		return errors.System("git.ConfigureSparseCheckout", err).
+			WithContext("repo_path", repoPath).
+			WithContext("stderr", strings.TrimSpace(stderr.String())).
+			WithHint("Failed to get git directory. Ensure this is a valid git repository.")
 	}
 	gitDir := strings.TrimSpace(stdout.String())
 	if !filepath.IsAbs(gitDir) {
@@ -883,12 +1186,16 @@ func ConfigureSparseCheckout(repoPath string) error {
 	// - .mcp.json     : MCP server configuration
 	infoDir := filepath.Join(gitDir, "info")
 	if err := os.MkdirAll(infoDir, 0755); err != nil {
-		return fmt.Errorf("creating info dir: %w", err)
+		return errors.System("git.ConfigureSparseCheckout", err).
+			WithContext("repo_path", repoPath).
+			WithHint("Failed to create git info directory. Check filesystem permissions.")
 	}
 	sparseFile := filepath.Join(infoDir, "sparse-checkout")
 	sparsePatterns := "/*\n!/.claude/\n!/CLAUDE.md\n!/CLAUDE.local.md\n!/.mcp.json\n"
 	if err := os.WriteFile(sparseFile, []byte(sparsePatterns), 0644); err != nil {
-		return fmt.Errorf("writing sparse-checkout: %w", err)
+		return errors.System("git.ConfigureSparseCheckout", err).
+			WithContext("repo_path", repoPath).
+			WithHint("Failed to write sparse-checkout file. Check filesystem permissions.")
 	}
 
 	// Check if HEAD exists (repo has commits) before running read-tree
@@ -904,7 +1211,10 @@ func ConfigureSparseCheckout(repoPath string) error {
 	stderr.Reset()
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("applying sparse checkout: %s", strings.TrimSpace(stderr.String()))
+		return errors.System("git.ConfigureSparseCheckout", err).
+			WithContext("repo_path", repoPath).
+			WithContext("stderr", strings.TrimSpace(stderr.String())).
+			WithHint("Failed to apply sparse checkout. Ensure the repository has valid commits and working directory is clean.")
 	}
 	return nil
 }
