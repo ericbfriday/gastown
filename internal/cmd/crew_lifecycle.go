@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -102,9 +101,9 @@ func runCrewRemove(cmd *cobra.Command, args []string) error {
 		} else {
 			// For regular clones, use the crew manager
 			if err := crewMgr.Remove(name, forceRemove); err != nil {
-				if err == crew.ErrCrewNotFound {
+				if crew.IsNotFoundError(err) {
 					fmt.Printf("Error removing %s: crew workspace not found\n", arg)
-				} else if err == crew.ErrHasChanges {
+				} else if crew.IsUncommittedChangesError(err) {
 					fmt.Printf("Error removing %s: uncommitted changes (use --force)\n", arg)
 				} else {
 					fmt.Printf("Error removing %s: %v\n", arg, err)
@@ -205,7 +204,7 @@ func runCrewRefresh(cmd *cobra.Command, args []string) error {
 	// Get the crew worker (must exist for refresh)
 	worker, err := crewMgr.Get(name)
 	if err != nil {
-		if err == crew.ErrCrewNotFound {
+		if crew.IsNotFoundError(err) {
 			return fmt.Errorf("crew workspace '%s' not found", name)
 		}
 		return fmt.Errorf("getting crew worker: %w", err)
@@ -334,7 +333,7 @@ func runCrewStart(cmd *cobra.Command, args []string) error {
 		go func(crewName string) {
 			defer wg.Done()
 			err := crewMgr.Start(crewName, opts)
-			skipped := errors.Is(err, crew.ErrSessionRunning)
+			skipped := crew.IsSessionRunningError(err)
 			if skipped {
 				err = nil // Not an error, just already running
 			}

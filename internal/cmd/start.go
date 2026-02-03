@@ -917,7 +917,7 @@ func runStartCrew(cmd *cobra.Command, args []string) error {
 		AgentOverride:   startCrewAgentOverride,
 	})
 	if err != nil {
-		if errors.Is(err, crew.ErrSessionRunning) {
+		if crew.IsSessionRunningError(err) {
 			fmt.Printf("%s Session already running: %s\n", style.Dim.Render("○"), crewMgr.SessionName(name))
 		} else {
 			return err
@@ -1002,7 +1002,7 @@ func startCrewMember(rigName, crewName, townRoot string) error {
 
 	// Start handles workspace creation, settings, and session all in one
 	err = crewMgr.Start(crewName, crew.StartOptions{})
-	if err != nil && !errors.Is(err, crew.ErrSessionRunning) {
+	if err != nil && !crew.IsSessionRunningError(err) {
 		return err
 	}
 

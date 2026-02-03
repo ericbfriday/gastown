@@ -575,7 +575,7 @@ func startCrewFromSettings(townRoot, rigName string) ([]string, map[string]error
 	// Start each crew member using Manager
 	for _, crewName := range toStart {
 		if err := crewMgr.Start(crewName, crew.StartOptions{}); err != nil {
-			if err == crew.ErrSessionRunning {
+			if crew.IsSessionRunningError(err) {
 				started = append(started, crewName)
 			} else {
 				errors[crewName] = err

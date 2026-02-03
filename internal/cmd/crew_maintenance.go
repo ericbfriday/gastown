@@ -41,10 +41,10 @@ func runCrewRename(cmd *cobra.Command, args []string) error {
 
 	// Perform the rename
 	if err := crewMgr.Rename(oldName, newName); err != nil {
-		if err == crew.ErrCrewNotFound {
+		if crew.IsNotFoundError(err) {
 			return fmt.Errorf("crew workspace '%s' not found", oldName)
 		}
-		if err == crew.ErrCrewExists {
+		if crew.IsAlreadyExistsError(err) {
 			return fmt.Errorf("crew workspace '%s' already exists", newName)
 		}
 		return fmt.Errorf("renaming crew workspace: %w", err)
@@ -74,7 +74,7 @@ func runCrewPristine(cmd *cobra.Command, args []string) error {
 		}
 		worker, err := crewMgr.Get(name)
 		if err != nil {
-			if err == crew.ErrCrewNotFound {
+			if crew.IsNotFoundError(err) {
 				return fmt.Errorf("crew workspace '%s' not found", name)
 			}
 			return fmt.Errorf("getting crew worker: %w", err)

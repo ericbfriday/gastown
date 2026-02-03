@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/errors"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
 )
@@ -88,14 +89,32 @@ func TestManagerAddAndGet(t *testing.T) {
 
 	// Test duplicate Add
 	_, err = mgr.Add("dave", false)
-	if err != ErrCrewExists {
-		t.Errorf("expected ErrCrewExists, got %v", err)
+	if err == nil {
+		t.Error("expected error for duplicate add")
+	} else {
+		var gErr *errors.Error
+		if errors.As(err, &gErr) {
+			if gErr.Op != "crew.AlreadyExists" {
+				t.Errorf("expected crew.AlreadyExists error, got %s", gErr.Op)
+			}
+		} else {
+			t.Errorf("expected errors.Error type, got %T", err)
+		}
 	}
 
 	// Test Get non-existent
 	_, err = mgr.Get("nonexistent")
-	if err != ErrCrewNotFound {
-		t.Errorf("expected ErrCrewNotFound, got %v", err)
+	if err == nil {
+		t.Error("expected error for non-existent worker")
+	} else {
+		var gErr *errors.Error
+		if errors.As(err, &gErr) {
+			if gErr.Op != "crew.NotFound" {
+				t.Errorf("expected crew.NotFound error, got %s", gErr.Op)
+			}
+		} else {
+			t.Errorf("expected errors.Error type, got %T", err)
+		}
 	}
 }
 
@@ -331,14 +350,28 @@ func TestManagerRemove(t *testing.T) {
 
 	// Verify it's gone
 	_, err = mgr.Get("charlie")
-	if err != ErrCrewNotFound {
-		t.Errorf("expected ErrCrewNotFound, got %v", err)
+	if err == nil {
+		t.Error("expected error for removed worker")
+	} else {
+		var gErr *errors.Error
+		if errors.As(err, &gErr) {
+			if gErr.Op != "crew.NotFound" {
+				t.Errorf("expected crew.NotFound error, got %s", gErr.Op)
+			}
+		}
 	}
 
 	// Remove non-existent
 	err = mgr.Remove("nonexistent", false)
-	if err != ErrCrewNotFound {
-		t.Errorf("expected ErrCrewNotFound, got %v", err)
+	if err == nil {
+		t.Error("expected error for non-existent worker")
+	} else {
+		var gErr *errors.Error
+		if errors.As(err, &gErr) {
+			if gErr.Op != "crew.NotFound" {
+				t.Errorf("expected crew.NotFound error, got %s", gErr.Op)
+			}
+		}
 	}
 }
 

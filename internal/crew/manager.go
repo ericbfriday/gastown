@@ -1,8 +1,8 @@
 package crew
 
 import (
+	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/claude"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/errors"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
@@ -21,12 +22,18 @@ import (
 
 // Common errors
 var (
-	ErrCrewExists      = errors.New("crew worker already exists")
-	ErrCrewNotFound    = errors.New("crew worker not found")
-	ErrHasChanges      = errors.New("crew worker has uncommitted changes")
-	ErrInvalidCrewName = errors.New("invalid crew name")
-	ErrSessionRunning  = errors.New("session already running")
-	ErrSessionNotFound = errors.New("session not found")
+	ErrCrewExists = errors.Permanent("crew.Exists", nil).
+		WithHint("Use a different worker name or remove the existing worker with 'gt crew rm <name>'")
+	ErrCrewNotFound = errors.Permanent("crew.NotFound", nil).
+		WithHint("Use 'gt crew list' to see available crew workers")
+	ErrHasChanges = errors.User("crew.UncommittedChanges", "worker has uncommitted changes").
+		WithHint("Commit or stash changes, or use --force to remove anyway")
+	ErrInvalidCrewName = errors.User("crew.InvalidName", "invalid crew worker name").
+		WithHint("Worker names must be lowercase, alphanumeric with underscores only")
+	ErrSessionRunning = errors.Permanent("crew.SessionRunning", nil).
+		WithHint("Stop the session first with 'gt crew stop <name>' or use --restart")
+	ErrSessionNotFound = errors.Permanent("crew.SessionNotFound", nil).
+		WithHint("Start the session first with 'gt crew start <name>'")
 )
 
 // StartOptions configures crew session startup.
@@ -57,22 +64,32 @@ type StartOptions struct {
 // Rejects path traversal attempts and characters that break agent ID parsing.
 func validateCrewName(name string) error {
 	if name == "" {
-		return fmt.Errorf("%w: name cannot be empty", ErrInvalidCrewName)
+		return errors.User("crew.EmptyName", "worker name cannot be empty").
+			WithHint("Provide a valid worker name (lowercase, alphanumeric with underscores)")
 	}
 	if name == "." || name == ".." {
-		return fmt.Errorf("%w: %q is not allowed", ErrInvalidCrewName, name)
+		return errors.User("crew.InvalidName", "reserved name").
+			WithContext("name", name).
+			WithHint("Use a descriptive worker name (lowercase, alphanumeric with underscores)")
 	}
 	if strings.ContainsAny(name, "/\\") {
-		return fmt.Errorf("%w: %q contains path separators", ErrInvalidCrewName, name)
+		return errors.User("crew.PathSeparators", "worker name contains path separators").
+			WithContext("name", name).
+			WithHint("Worker names cannot contain '/' or '\\' characters")
 	}
 	if strings.Contains(name, "..") {
-		return fmt.Errorf("%w: %q contains path traversal sequence", ErrInvalidCrewName, name)
+		return errors.User("crew.PathTraversal", "worker name contains path traversal sequence").
+			WithContext("name", name).
+			WithHint("Worker names cannot contain '..' sequence")
 	}
 	// Reject characters that break agent ID parsing (same as rig names)
 	if strings.ContainsAny(name, "-. ") {
 		sanitized := strings.NewReplacer("-", "_", ".", "_", " ", "_").Replace(name)
 		sanitized = strings.ToLower(sanitized)
-		return fmt.Errorf("%w: %q contains invalid characters; hyphens, dots, and spaces are reserved for agent ID parsing. Try %q instead", ErrInvalidCrewName, name, sanitized)
+		return errors.User("crew.InvalidCharacters", "worker name contains invalid characters").
+			WithContext("name", name).
+			WithContext("suggested_name", sanitized).
+			WithHint(fmt.Sprintf("Hyphens, dots, and spaces are reserved for agent ID parsing. Try %q instead", sanitized))
 	}
 	return nil
 }
@@ -118,7 +135,10 @@ func (m *Manager) Add(name string, createBranch bool) (*CrewWorker, error) {
 		return nil, err
 	}
 	if m.exists(name) {
-		return nil, ErrCrewExists
+		return nil, errors.Permanent("crew.AlreadyExists", nil).
+			WithContext("worker_name", name).
+			WithContext("rig_name", m.rig.Name).
+			WithHint("Use a different worker name or remove the existing worker with 'gt crew rm " + name + "'")
 	}
 
 	crewPath := m.crewDir(name)
@@ -126,21 +146,44 @@ func (m *Manager) Add(name string, createBranch bool) (*CrewWorker, error) {
 	// Create crew directory if needed
 	crewBaseDir := filepath.Join(m.rig.Path, "crew")
 	if err := os.MkdirAll(crewBaseDir, 0755); err != nil {
-		return nil, fmt.Errorf("creating crew dir: %w", err)
+		return nil, errors.System("crew.CreateBaseDirFailed", err).
+			WithContext("worker_name", name).
+			WithContext("rig_name", m.rig.Name).
+			WithContext("path", crewBaseDir).
+			WithHint("Check directory permissions and available disk space")
 	}
 
-	// Clone the rig repo
-	if m.rig.LocalRepo != "" {
-		if err := m.git.CloneWithReference(m.rig.GitURL, crewPath, m.rig.LocalRepo); err != nil {
-			fmt.Printf("Warning: could not clone with local repo reference: %v\n", err)
+	// Clone the rig repo with retry logic
+	cloneErr := errors.RetryWithContext(context.Background(), func() error {
+		if m.rig.LocalRepo != "" {
+			if err := m.git.CloneWithReference(m.rig.GitURL, crewPath, m.rig.LocalRepo); err != nil {
+				fmt.Printf("Warning: could not clone with local repo reference: %v\n", err)
+				if err := m.git.Clone(m.rig.GitURL, crewPath); err != nil {
+					return errors.Transient("crew.CloneFailed", err).
+						WithContext("worker_name", name).
+						WithContext("rig_name", m.rig.Name).
+						WithContext("git_url", m.rig.GitURL).
+						WithContext("path", crewPath)
+				}
+			}
+		} else {
 			if err := m.git.Clone(m.rig.GitURL, crewPath); err != nil {
-				return nil, fmt.Errorf("cloning rig: %w", err)
+				return errors.Transient("crew.CloneFailed", err).
+					WithContext("worker_name", name).
+					WithContext("rig_name", m.rig.Name).
+					WithContext("git_url", m.rig.GitURL).
+					WithContext("path", crewPath)
 			}
 		}
-	} else {
-		if err := m.git.Clone(m.rig.GitURL, crewPath); err != nil {
-			return nil, fmt.Errorf("cloning rig: %w", err)
-		}
+		return nil
+	}, errors.NetworkRetryConfig())
+
+	if cloneErr != nil {
+		return nil, errors.Transient("crew.CloneWithRetryFailed", cloneErr).
+			WithContext("worker_name", name).
+			WithContext("rig_name", m.rig.Name).
+			WithContext("git_url", m.rig.GitURL).
+			WithHint("Check network connectivity, git credentials, and that the repository URL is correct")
 	}
 
 	crewGit := git.NewGit(crewPath)
@@ -151,11 +194,19 @@ func (m *Manager) Add(name string, createBranch bool) (*CrewWorker, error) {
 		branchName = fmt.Sprintf("crew/%s", name)
 		if err := crewGit.CreateBranch(branchName); err != nil {
 			_ = os.RemoveAll(crewPath) // best-effort cleanup
-			return nil, fmt.Errorf("creating branch: %w", err)
+			return nil, errors.Transient("crew.CreateBranchFailed", err).
+				WithContext("worker_name", name).
+				WithContext("rig_name", m.rig.Name).
+				WithContext("branch", branchName).
+				WithHint("Git operations may be failing. Check git installation and repository state")
 		}
 		if err := crewGit.Checkout(branchName); err != nil {
 			_ = os.RemoveAll(crewPath) // best-effort cleanup
-			return nil, fmt.Errorf("checking out branch: %w", err)
+			return nil, errors.Transient("crew.CheckoutBranchFailed", err).
+				WithContext("worker_name", name).
+				WithContext("rig_name", m.rig.Name).
+				WithContext("branch", branchName).
+				WithHint("Git checkout failed. The branch may not exist or repository may be corrupted")
 		}
 	}
 
@@ -163,7 +214,11 @@ func (m *Manager) Add(name string, createBranch bool) (*CrewWorker, error) {
 	mailPath := m.mailDir(name)
 	if err := os.MkdirAll(mailPath, 0755); err != nil {
 		_ = os.RemoveAll(crewPath) // best-effort cleanup
-		return nil, fmt.Errorf("creating mail dir: %w", err)
+		return nil, errors.System("crew.CreateMailDirFailed", err).
+			WithContext("worker_name", name).
+			WithContext("rig_name", m.rig.Name).
+			WithContext("path", mailPath).
+			WithHint("Check directory permissions and available disk space")
 	}
 
 	// Set up shared beads: crew uses rig's shared beads via redirect file
@@ -215,7 +270,11 @@ func (m *Manager) Add(name string, createBranch bool) (*CrewWorker, error) {
 	// Save state
 	if err := m.saveState(crew); err != nil {
 		_ = os.RemoveAll(crewPath) // best-effort cleanup
-		return nil, fmt.Errorf("saving state: %w", err)
+		return nil, errors.System("crew.SaveStateFailed", err).
+			WithContext("worker_name", name).
+			WithContext("rig_name", m.rig.Name).
+			WithContext("path", m.stateFile(name)).
+			WithHint("Check directory permissions and available disk space")
 	}
 
 	return crew, nil
@@ -227,7 +286,10 @@ func (m *Manager) Remove(name string, force bool) error {
 		return err
 	}
 	if !m.exists(name) {
-		return ErrCrewNotFound
+		return errors.Permanent("crew.NotFound", nil).
+			WithContext("worker_name", name).
+			WithContext("rig_name", m.rig.Name).
+			WithHint("Use 'gt crew list' to see available crew workers")
 	}
 
 	crewPath := m.crewDir(name)
@@ -236,13 +298,21 @@ func (m *Manager) Remove(name string, force bool) error {
 		crewGit := git.NewGit(crewPath)
 		hasChanges, err := crewGit.HasUncommittedChanges()
 		if err == nil && hasChanges {
-			return ErrHasChanges
+			return errors.User("crew.UncommittedChanges", "worker has uncommitted changes").
+				WithContext("worker_name", name).
+				WithContext("rig_name", m.rig.Name).
+				WithContext("path", crewPath).
+				WithHint("Commit or stash changes with 'cd " + crewPath + " && git add . && git commit', or use --force to remove anyway")
 		}
 	}
 
 	// Remove directory
 	if err := os.RemoveAll(crewPath); err != nil {
-		return fmt.Errorf("removing crew dir: %w", err)
+		return errors.System("crew.RemoveDirFailed", err).
+			WithContext("worker_name", name).
+			WithContext("rig_name", m.rig.Name).
+			WithContext("path", crewPath).
+			WithHint("Check directory permissions. You may need to manually delete: " + crewPath)
 	}
 
 	return nil
@@ -257,7 +327,10 @@ func (m *Manager) List() ([]*CrewWorker, error) {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("reading crew dir: %w", err)
+		return nil, errors.System("crew.ReadDirFailed", err).
+			WithContext("rig_name", m.rig.Name).
+			WithContext("path", crewBaseDir).
+			WithHint("Check directory permissions for: " + crewBaseDir)
 	}
 
 	var workers []*CrewWorker
@@ -282,7 +355,10 @@ func (m *Manager) Get(name string) (*CrewWorker, error) {
 		return nil, err
 	}
 	if !m.exists(name) {
-		return nil, ErrCrewNotFound
+		return nil, errors.Permanent("crew.NotFound", nil).
+			WithContext("worker_name", name).
+			WithContext("rig_name", m.rig.Name).
+			WithHint("Use 'gt crew list' to see available crew workers")
 	}
 
 	return m.loadState(name)
@@ -292,7 +368,11 @@ func (m *Manager) Get(name string) (*CrewWorker, error) {
 func (m *Manager) saveState(crew *CrewWorker) error {
 	stateFile := m.stateFile(crew.Name)
 	if err := util.AtomicWriteJSON(stateFile, crew); err != nil {
-		return fmt.Errorf("writing state: %w", err)
+		return errors.System("crew.WriteStateFailed", err).
+			WithContext("worker_name", crew.Name).
+			WithContext("rig_name", m.rig.Name).
+			WithContext("path", stateFile).
+			WithHint("Check directory permissions and available disk space")
 	}
 
 	return nil
@@ -312,12 +392,20 @@ func (m *Manager) loadState(name string) (*CrewWorker, error) {
 				ClonePath: m.crewDir(name),
 			}, nil
 		}
-		return nil, fmt.Errorf("reading state: %w", err)
+		return nil, errors.System("crew.ReadStateFailed", err).
+			WithContext("worker_name", name).
+			WithContext("rig_name", m.rig.Name).
+			WithContext("path", stateFile).
+			WithHint("Check directory permissions for: " + stateFile)
 	}
 
 	var crew CrewWorker
 	if err := json.Unmarshal(data, &crew); err != nil {
-		return nil, fmt.Errorf("parsing state: %w", err)
+		return nil, errors.System("crew.ParseStateFailed", err).
+			WithContext("worker_name", name).
+			WithContext("rig_name", m.rig.Name).
+			WithContext("path", stateFile).
+			WithHint("State file may be corrupted. Try removing and recreating the worker")
 	}
 
 	// Directory name is source of truth for Name and ClonePath.
@@ -336,10 +424,17 @@ func (m *Manager) loadState(name string) (*CrewWorker, error) {
 // Rename renames a crew worker from oldName to newName.
 func (m *Manager) Rename(oldName, newName string) error {
 	if !m.exists(oldName) {
-		return ErrCrewNotFound
+		return errors.Permanent("crew.NotFound", nil).
+			WithContext("worker_name", oldName).
+			WithContext("rig_name", m.rig.Name).
+			WithHint("Use 'gt crew list' to see available crew workers")
 	}
 	if m.exists(newName) {
-		return ErrCrewExists
+		return errors.Permanent("crew.AlreadyExists", nil).
+			WithContext("old_name", oldName).
+			WithContext("new_name", newName).
+			WithContext("rig_name", m.rig.Name).
+			WithHint("Use a different worker name or remove the existing worker with 'gt crew rm " + newName + "'")
 	}
 
 	oldPath := m.crewDir(oldName)
@@ -347,7 +442,13 @@ func (m *Manager) Rename(oldName, newName string) error {
 
 	// Rename directory
 	if err := os.Rename(oldPath, newPath); err != nil {
-		return fmt.Errorf("renaming crew dir: %w", err)
+		return errors.System("crew.RenameDirFailed", err).
+			WithContext("old_name", oldName).
+			WithContext("new_name", newName).
+			WithContext("rig_name", m.rig.Name).
+			WithContext("old_path", oldPath).
+			WithContext("new_path", newPath).
+			WithHint("Check directory permissions and that the worker is not in use")
 	}
 
 	// Update state file with new name and path
@@ -355,7 +456,11 @@ func (m *Manager) Rename(oldName, newName string) error {
 	if err != nil {
 		// Rollback on error (best-effort)
 		_ = os.Rename(newPath, oldPath)
-		return fmt.Errorf("loading state: %w", err)
+		return errors.System("crew.LoadStateAfterRenameFailed", err).
+			WithContext("old_name", oldName).
+			WithContext("new_name", newName).
+			WithContext("rig_name", m.rig.Name).
+			WithHint("Worker was renamed but state could not be loaded. Try manually fixing: " + newPath)
 	}
 
 	crew.Name = newName
@@ -365,7 +470,11 @@ func (m *Manager) Rename(oldName, newName string) error {
 	if err := m.saveState(crew); err != nil {
 		// Rollback on error (best-effort)
 		_ = os.Rename(newPath, oldPath)
-		return fmt.Errorf("saving state: %w", err)
+		return errors.System("crew.SaveStateAfterRenameFailed", err).
+			WithContext("old_name", oldName).
+			WithContext("new_name", newName).
+			WithContext("rig_name", m.rig.Name).
+			WithHint("Worker was renamed but state could not be saved. Try manually fixing: " + newPath)
 	}
 
 	return nil
@@ -378,7 +487,10 @@ func (m *Manager) Pristine(name string) (*PristineResult, error) {
 		return nil, err
 	}
 	if !m.exists(name) {
-		return nil, ErrCrewNotFound
+		return nil, errors.Permanent("crew.NotFound", nil).
+			WithContext("worker_name", name).
+			WithContext("rig_name", m.rig.Name).
+			WithHint("Use 'gt crew list' to see available crew workers")
 	}
 
 	crewPath := m.crewDir(name)
@@ -391,13 +503,32 @@ func (m *Manager) Pristine(name string) (*PristineResult, error) {
 	// Check for uncommitted changes
 	hasChanges, err := crewGit.HasUncommittedChanges()
 	if err != nil {
-		return nil, fmt.Errorf("checking changes: %w", err)
+		return nil, errors.Transient("crew.CheckChangesFailed", err).
+			WithContext("worker_name", name).
+			WithContext("rig_name", m.rig.Name).
+			WithContext("path", crewPath).
+			WithHint("Git status check failed. Verify git installation and repository state")
 	}
 	result.HadChanges = hasChanges
 
-	// Pull latest (use origin and current branch)
-	if err := crewGit.Pull("origin", ""); err != nil {
-		result.PullError = err.Error()
+	// Pull latest (use origin and current branch) with retry logic
+	pullErr := errors.RetryWithContext(context.Background(), func() error {
+		if err := crewGit.Pull("origin", ""); err != nil {
+			return errors.Transient("crew.PullFailed", err).
+				WithContext("worker_name", name).
+				WithContext("rig_name", m.rig.Name).
+				WithContext("path", crewPath)
+		}
+		return nil
+	}, errors.NetworkRetryConfig())
+
+	if pullErr != nil {
+		result.PullError = pullErr.Error()
+		// Add hint for common pull errors
+		var gErr *errors.Error
+		if errors.As(pullErr, &gErr) {
+			gErr.WithHint("Check network connectivity and git credentials. If you have uncommitted changes, commit or stash them first")
+		}
 	} else {
 		result.Pulled = true
 	}
@@ -439,13 +570,23 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 
 	// Get or create the crew worker
 	worker, err := m.Get(name)
-	if err == ErrCrewNotFound {
-		worker, err = m.Add(name, false) // No feature branch for crew
-		if err != nil {
-			return fmt.Errorf("creating crew workspace: %w", err)
+	if err != nil {
+		// Check if it's a not found error
+		var gErr *errors.Error
+		if errors.As(err, &gErr) && gErr.Op == "crew.NotFound" {
+			worker, err = m.Add(name, false) // No feature branch for crew
+			if err != nil {
+				return errors.System("crew.CreateWorkspaceFailed", err).
+					WithContext("worker_name", name).
+					WithContext("rig_name", m.rig.Name).
+					WithHint("Failed to create crew workspace. Check permissions and available disk space")
+			}
+		} else {
+			return errors.System("crew.GetWorkerFailed", err).
+				WithContext("worker_name", name).
+				WithContext("rig_name", m.rig.Name).
+				WithHint("Failed to get crew worker information")
 		}
-	} else if err != nil {
-		return fmt.Errorf("getting crew worker: %w", err)
 	}
 
 	t := tmux.NewTmux()
@@ -454,24 +595,40 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 	// Check if session already exists
 	running, err := t.HasSession(sessionID)
 	if err != nil {
-		return fmt.Errorf("checking session: %w", err)
+		return errors.System("crew.CheckSessionFailed", err).
+			WithContext("worker_name", name).
+			WithContext("rig_name", m.rig.Name).
+			WithContext("session_id", sessionID).
+			WithHint("Failed to check tmux session. Verify tmux is installed and running")
 	}
 	if running {
 		if opts.KillExisting {
 			// Restart mode - kill existing session.
 			// Use KillSessionWithProcesses to ensure all descendant processes are killed.
 			if err := t.KillSessionWithProcesses(sessionID); err != nil {
-				return fmt.Errorf("killing existing session: %w", err)
+				return errors.System("crew.KillExistingSessionFailed", err).
+					WithContext("worker_name", name).
+					WithContext("rig_name", m.rig.Name).
+					WithContext("session_id", sessionID).
+					WithHint("Failed to kill existing session. Try 'tmux kill-session -t " + sessionID + "'")
 			}
 		} else {
 			// Normal start - session exists, check if Claude is actually running
 			if t.IsClaudeRunning(sessionID) {
-				return fmt.Errorf("%w: %s", ErrSessionRunning, sessionID)
+				return errors.Permanent("crew.SessionRunning", nil).
+					WithContext("worker_name", name).
+					WithContext("rig_name", m.rig.Name).
+					WithContext("session_id", sessionID).
+					WithHint("Stop the session first with 'gt crew stop " + name + "' or use --restart to force restart")
 			}
 			// Zombie session - kill and recreate.
 			// Use KillSessionWithProcesses to ensure all descendant processes are killed.
 			if err := t.KillSessionWithProcesses(sessionID); err != nil {
-				return fmt.Errorf("killing zombie session: %w", err)
+				return errors.System("crew.KillZombieSessionFailed", err).
+					WithContext("worker_name", name).
+					WithContext("rig_name", m.rig.Name).
+					WithContext("session_id", sessionID).
+					WithHint("Failed to kill zombie session. Try 'tmux kill-session -t " + sessionID + "'")
 			}
 		}
 	}
@@ -481,7 +638,11 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 	// All crew members share the same settings file.
 	crewBaseDir := filepath.Join(m.rig.Path, "crew")
 	if err := claude.EnsureSettingsForRole(crewBaseDir, "crew"); err != nil {
-		return fmt.Errorf("ensuring Claude settings: %w", err)
+		return errors.System("crew.EnsureSettingsFailed", err).
+			WithContext("worker_name", name).
+			WithContext("rig_name", m.rig.Name).
+			WithContext("path", crewBaseDir).
+			WithHint("Failed to ensure Claude settings. Check directory permissions")
 	}
 
 	// Build the startup beacon for predecessor discovery via /resume
@@ -501,7 +662,10 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 	// SessionStart hook handles context loading (gt prime --hook)
 	claudeCmd, err := config.BuildCrewStartupCommandWithAgentOverride(m.rig.Name, name, m.rig.Path, beacon, opts.AgentOverride)
 	if err != nil {
-		return fmt.Errorf("building startup command: %w", err)
+		return errors.System("crew.BuildStartupCommandFailed", err).
+			WithContext("worker_name", name).
+			WithContext("rig_name", m.rig.Name).
+			WithHint("Failed to build startup command. Check Claude configuration")
 	}
 
 	// For interactive/refresh mode, remove --dangerously-skip-permissions
@@ -512,7 +676,12 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 	// Create session with command directly to avoid send-keys race condition.
 	// See: https://github.com/anthropics/gastown/issues/280
 	if err := t.NewSessionWithCommand(sessionID, worker.ClonePath, claudeCmd); err != nil {
-		return fmt.Errorf("creating session: %w", err)
+		return errors.System("crew.CreateSessionFailed", err).
+			WithContext("worker_name", name).
+			WithContext("rig_name", m.rig.Name).
+			WithContext("session_id", sessionID).
+			WithContext("path", worker.ClonePath).
+			WithHint("Failed to create tmux session. Verify tmux is installed and the worker path exists")
 	}
 
 	// Set environment variables (non-fatal: session works without these)
@@ -557,17 +726,29 @@ func (m *Manager) Stop(name string) error {
 	// Check if session exists
 	running, err := t.HasSession(sessionID)
 	if err != nil {
-		return fmt.Errorf("checking session: %w", err)
+		return errors.System("crew.CheckSessionFailed", err).
+			WithContext("worker_name", name).
+			WithContext("rig_name", m.rig.Name).
+			WithContext("session_id", sessionID).
+			WithHint("Failed to check tmux session. Verify tmux is installed and running")
 	}
 	if !running {
-		return ErrSessionNotFound
+		return errors.Permanent("crew.SessionNotFound", nil).
+			WithContext("worker_name", name).
+			WithContext("rig_name", m.rig.Name).
+			WithContext("session_id", sessionID).
+			WithHint("Session is not running. Start it with 'gt crew start " + name + "'")
 	}
 
 	// Kill the session.
 	// Use KillSessionWithProcesses to ensure all descendant processes are killed.
 	// This prevents orphan bash processes from Claude's Bash tool surviving session termination.
 	if err := t.KillSessionWithProcesses(sessionID); err != nil {
-		return fmt.Errorf("killing session: %w", err)
+		return errors.System("crew.KillSessionFailed", err).
+			WithContext("worker_name", name).
+			WithContext("rig_name", m.rig.Name).
+			WithContext("session_id", sessionID).
+			WithHint("Failed to kill session. Try 'tmux kill-session -t " + sessionID + "'")
 	}
 
 	return nil
@@ -577,6 +758,59 @@ func (m *Manager) Stop(name string) error {
 func (m *Manager) IsRunning(name string) (bool, error) {
 	t := tmux.NewTmux()
 	sessionID := m.SessionName(name)
-	return t.HasSession(sessionID)
+	running, err := t.HasSession(sessionID)
+	if err != nil {
+		return false, errors.System("crew.CheckSessionFailed", err).
+			WithContext("worker_name", name).
+			WithContext("rig_name", m.rig.Name).
+			WithContext("session_id", sessionID).
+			WithHint("Failed to check tmux session. Verify tmux is installed and running")
+	}
+	return running, nil
+}
+
+// IsNotFoundError checks if an error is a crew not found error.
+func IsNotFoundError(err error) bool {
+	var gErr *errors.Error
+	if errors.As(err, &gErr) {
+		return gErr.Op == "crew.NotFound"
+	}
+	return false
+}
+
+// IsAlreadyExistsError checks if an error is a crew already exists error.
+func IsAlreadyExistsError(err error) bool {
+	var gErr *errors.Error
+	if errors.As(err, &gErr) {
+		return gErr.Op == "crew.AlreadyExists" || gErr.Op == "crew.Exists"
+	}
+	return false
+}
+
+// IsUncommittedChangesError checks if an error is an uncommitted changes error.
+func IsUncommittedChangesError(err error) bool {
+	var gErr *errors.Error
+	if errors.As(err, &gErr) {
+		return gErr.Op == "crew.UncommittedChanges"
+	}
+	return false
+}
+
+// IsSessionRunningError checks if an error is a session already running error.
+func IsSessionRunningError(err error) bool {
+	var gErr *errors.Error
+	if errors.As(err, &gErr) {
+		return gErr.Op == "crew.SessionRunning"
+	}
+	return false
+}
+
+// IsSessionNotFoundError checks if an error is a session not found error.
+func IsSessionNotFoundError(err error) bool {
+	var gErr *errors.Error
+	if errors.As(err, &gErr) {
+		return gErr.Op == "crew.SessionNotFound"
+	}
+	return false
 }
 
