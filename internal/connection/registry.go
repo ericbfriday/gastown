@@ -3,7 +3,6 @@ package connection
 import (
 	"encoding/json"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
@@ -122,12 +121,25 @@ func (r *MachineRegistry) saveUnsafe() error {
 		return fmt.Errorf("marshaling registry: %w", err)
 	}
 
-	// Atomic write via temp file
-	tmp := r.path + ".tmp"
-	if err := os.WriteFile(tmp, data, fs.FileMode(0644)); err != nil {
+	// Atomic write via unique temp file (multi-process safe)
+	dir := filepath.Dir(r.path)
+	base := filepath.Base(r.path)
+	tmpFile, err := os.CreateTemp(dir, base+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("creating temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath) // Clean up on error
+
+	if _, err := tmpFile.Write(data); err != nil {
+		tmpFile.Close()
 		return fmt.Errorf("writing temp file: %w", err)
 	}
-	if err := os.Rename(tmp, r.path); err != nil {
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("closing temp file: %w", err)
+	}
+
+	if err := os.Rename(tmpPath, r.path); err != nil {
 		return fmt.Errorf("writing registry: %w", err)
 	}
 
