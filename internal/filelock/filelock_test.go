@@ -297,7 +297,7 @@ func TestRaceCondition(t *testing.T) {
 	path := filepath.Join(tmpDir, "counter.txt")
 
 	// Write initial value
-	if err := os.WriteFile(path, []byte("0"), 0644); err != nil {
+	if err := os.WriteFile(path, []byte("0\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -322,17 +322,21 @@ func TestRaceCondition(t *testing.T) {
 
 					// Parse, increment, write back
 					var count int
-					if _, err := fmt.Sscanf(string(data), "%d", &count); err != nil {
-						return err
+					content := string(data)
+					// Handle both with and without newline
+					content = content[:len(content)-findNewlinePos(content)]
+					if _, err := fmt.Sscanf(content, "%d", &count); err != nil {
+						return fmt.Errorf("parse error on %q: %w", content, err)
 					}
 
 					count++
 
-					return os.WriteFile(path, []byte(fmt.Sprintf("%d", count)), 0644)
+					return os.WriteFile(path, []byte(fmt.Sprintf("%d\n", count)), 0644)
 				})
 
 				if err != nil {
 					t.Errorf("increment error: %v", err)
+					return
 				}
 			}
 		}()
@@ -347,14 +351,25 @@ func TestRaceCondition(t *testing.T) {
 	}
 
 	var finalCount int
-	if _, err := fmt.Sscanf(string(data), "%d", &finalCount); err != nil {
-		t.Fatal(err)
+	content := string(data)
+	content = content[:len(content)-findNewlinePos(content)]
+	if _, err := fmt.Sscanf(content, "%d", &finalCount); err != nil {
+		t.Fatalf("final parse error on %q: %v", content, err)
 	}
 
 	expected := numGoroutines * incrementsPerGoroutine
 	if finalCount != expected {
 		t.Errorf("final count = %d, want %d (race condition detected)", finalCount, expected)
 	}
+}
+
+func findNewlinePos(s string) int {
+	for i := len(s) - 1; i >= 0; i-- {
+		if s[i] == '\n' {
+			return len(s) - i
+		}
+	}
+	return 0
 }
 
 func TestConcurrentReadersExclusiveWriter(t *testing.T) {

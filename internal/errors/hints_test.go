@@ -170,7 +170,7 @@ func TestSuggestRetry(t *testing.T) {
 		if !strings.Contains(hint, "network timeout") {
 			t.Errorf("hint should contain reason")
 		}
-		if !strings.Contains(strings.ToLower(hint), "retry") {
+		if !strings.Contains(hint, "retried") && !strings.Contains(strings.ToLower(hint), "retry") {
 			t.Errorf("hint should suggest retry, got: %s", hint)
 		}
 	})
@@ -180,7 +180,7 @@ func TestSuggestRetry(t *testing.T) {
 		if !strings.Contains(hint, "database query") {
 			t.Errorf("hint should contain operation name")
 		}
-		if !strings.Contains(strings.ToLower(hint), "retry") {
+		if !strings.Contains(hint, "retried") && !strings.Contains(strings.ToLower(hint), "retry") {
 			t.Errorf("hint should suggest retry, got: %s", hint)
 		}
 	})

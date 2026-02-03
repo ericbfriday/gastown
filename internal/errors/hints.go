@@ -198,6 +198,11 @@ func EnrichErrorWithHint(err error) error {
 		}
 	}
 
+	// Merge conflicts (may not have "git" in error message)
+	if strings.Contains(errStr, "conflict") || strings.Contains(errStr, "merge") {
+		return User("git.conflict", errStr).WithHint(HintGitConflict)
+	}
+
 	// Network errors
 	if strings.Contains(errStr, "connection refused") || strings.Contains(errStr, "no route to host") {
 		return Transient("network", err).WithHint(HintNetworkError)
