@@ -581,7 +581,7 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 	if !info.Created.IsZero() {
 		uptime := time.Since(info.Created)
 		fmt.Printf("  Created: %s\n", info.Created.Format("2006-01-02 15:04:05"))
-		fmt.Printf("  Uptime: %s\n", formatDuration(uptime))
+		fmt.Printf("  Uptime: %s\n", sessionFormatDuration(uptime))
 	}
 
 	fmt.Printf("\nAttach with: %s\n", style.Dim.Render(fmt.Sprintf("gt session at %s/%s", rigName, polecatName)))
@@ -589,7 +589,7 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 }
 
 // formatDuration formats a duration for human display.
-func formatDuration(d time.Duration) string {
+func sessionFormatDuration(d time.Duration) string {
 	if d < time.Minute {
 		return fmt.Sprintf("%ds", int(d.Seconds()))
 	}

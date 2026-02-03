@@ -9,8 +9,8 @@ import (
 )
 
 var (
-	statusJSON         bool
-	statusVerbose      bool
+	workspaceStatusJSON         bool
+	workspaceStatusVerbose      bool
 	statusWorkspaceType string
 )
 
@@ -36,8 +36,8 @@ Examples:
 		RunE: runWorkspaceStatus,
 	}
 
-	cmd.Flags().BoolVar(&statusJSON, "json", false, "Output as JSON")
-	cmd.Flags().BoolVarP(&statusVerbose, "verbose", "v", false, "Verbose output")
+	cmd.Flags().BoolVar(&workspaceStatusJSON, "json", false, "Output as JSON")
+	cmd.Flags().BoolVarP(&workspaceStatusVerbose, "verbose", "v", false, "Verbose output")
 	cmd.Flags().StringVarP(&statusWorkspaceType, "type", "t", "crew", "Workspace type")
 
 	return cmd
@@ -75,14 +75,14 @@ func runWorkspaceStatus(cmd *cobra.Command, args []string) error {
 
 	// Run preflight check
 	checker := cleanup.NewPreflightChecker(workingDir)
-	checker.SetVerbose(statusVerbose)
+	checker.SetVerbose(workspaceStatusVerbose)
 	checkResult, err := checker.Check()
 	if err != nil {
 		return fmt.Errorf("preflight check failed: %w", err)
 	}
 
 	// Output as JSON
-	if statusJSON {
+	if workspaceStatusJSON {
 		output := map[string]interface{}{
 			"state":     state,
 			"preflight": checkResult,
@@ -133,7 +133,7 @@ func runWorkspaceStatus(cmd *cobra.Command, args []string) error {
 		fmt.Printf("❌ Can proceed: No\n")
 	}
 
-	if statusVerbose {
+	if workspaceStatusVerbose {
 		if len(checkResult.Issues) > 0 {
 			fmt.Println("\nIssues:")
 			for _, issue := range checkResult.Issues {

@@ -251,7 +251,11 @@ func runTemplateCreate(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create beads client
-	bd := beads.New()
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("getting working directory: %w", err)
+	}
+	bd := beads.New(cwd)
 
 	// Create epic from template
 	epic, subtasks, err := bd.CreateFromTemplate(templateName, vars)

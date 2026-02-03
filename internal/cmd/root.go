@@ -243,6 +243,7 @@ const (
 	GroupWorkspace = "workspace"
 	GroupConfig    = "config"
 	GroupDiag      = "diag"
+	GroupAnalysis  = "analysis"
 )
 
 func init() {
@@ -258,6 +259,7 @@ func init() {
 		&cobra.Group{ID: GroupWorkspace, Title: "Workspace:"},
 		&cobra.Group{ID: GroupConfig, Title: "Configuration:"},
 		&cobra.Group{ID: GroupDiag, Title: "Diagnostics:"},
+		&cobra.Group{ID: GroupAnalysis, Title: "Analysis:"},
 	)
 
 	// Put help and completion in a sensible group

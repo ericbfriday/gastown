@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"bufio"
 	"crypto/rand"
 	"encoding/base32"
 	"fmt"

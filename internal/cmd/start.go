@@ -1,10 +1,8 @@
 package cmd
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -484,7 +482,7 @@ func runShutdown(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 
 	// Confirmation prompt
-	if !prompt.ConfirmBatch("Proceed with shutdown of", len(sessionNames),
+	if !prompt.ConfirmBatch("Proceed with shutdown of", len(toStop),
 		prompt.WithForce(shutdownForce),
 		prompt.WithYes(shutdownYes),
 	) {

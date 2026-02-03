@@ -402,12 +402,12 @@ func detectRigPath() (string, error) {
 	}
 
 	// Try to find rig from current directory
-	rigPath, err := rig.FindRigFromPath(cwd)
+	r, err := rig.FindRigFromPath(cwd)
 	if err != nil {
 		return "", fmt.Errorf("not in a rig directory")
 	}
 
-	return rigPath, nil
+	return r.Path, nil
 }
 
 func loadNamePool(rigPath, rigName string) (*polecat.NamePool, error) {

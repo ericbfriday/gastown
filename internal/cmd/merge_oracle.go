@@ -185,7 +185,7 @@ func runMergeOracleQueue(cmd *cobra.Command, args []string) error {
 	}
 
 	if mergeOracleJSON {
-		return outputJSON(queueAnalysis)
+		return mergeOracleOutputJSON(queueAnalysis)
 	}
 
 	return outputQueueText(queueAnalysis, townRoot)
@@ -230,7 +230,7 @@ func runMergeOracleAnalyze(cmd *cobra.Command, args []string) error {
 	}
 
 	if mergeOracleJSON {
-		return outputJSON(analysis)
+		return mergeOracleOutputJSON(analysis)
 	}
 
 	return outputAnalysisText(analysis, townRoot)
@@ -265,7 +265,7 @@ func runMergeOracleConflicts(cmd *cobra.Command, args []string) error {
 	}
 
 	if mergeOracleJSON {
-		return outputJSON(queueAnalysis.ConflictPairs)
+		return mergeOracleOutputJSON(queueAnalysis.ConflictPairs)
 	}
 
 	return outputConflictsText(queueAnalysis.ConflictPairs)
@@ -300,7 +300,7 @@ func runMergeOracleRecommend(cmd *cobra.Command, args []string) error {
 	}
 
 	if mergeOracleJSON {
-		return outputJSON(queueAnalysis.RecommendedOrder)
+		return mergeOracleOutputJSON(queueAnalysis.RecommendedOrder)
 	}
 
 	return outputRecommendationsText(queueAnalysis)
@@ -329,7 +329,7 @@ func setupMergeOracle() (string, *rig.Rig, *beads.Beads, error) {
 			return "", nil, nil, fmt.Errorf("rig %q not found", mergeOracleRig)
 		}
 
-		r, err = rig.Load(rigEntry.Path)
+		r, err = rig.Load(rigEntry.LocalRepo)
 		if err != nil {
 			return "", nil, nil, fmt.Errorf("loading rig: %w", err)
 		}
@@ -343,10 +343,7 @@ func setupMergeOracle() (string, *rig.Rig, *beads.Beads, error) {
 	}
 
 	// Initialize beads
-	b, err := beads.New(r.Path)
-	if err != nil {
-		return "", nil, nil, fmt.Errorf("initializing beads: %w", err)
-	}
+	b := beads.New(r.Path)
 
 	return townRoot, r, b, nil
 }
@@ -369,7 +366,7 @@ func getAnalysisConfig() *mergeoracle.AnalysisConfig {
 	return config
 }
 
-func outputJSON(v interface{}) error {
+func mergeOracleOutputJSON(v interface{}) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(v)
@@ -390,7 +387,7 @@ func outputQueueText(qa *mergeoracle.QueueAnalysis, townRoot string) error {
 	fmt.Printf("Total MRs: %d\n", len(qa.MRs))
 	fmt.Printf("High Risk: %d\n", qa.QueueHealth.HighRiskCount)
 	fmt.Printf("Conflicts: %d\n", qa.QueueHealth.ConflictCount)
-	fmt.Printf("Average Age: %s\n\n", formatDuration(qa.QueueHealth.AverageAge))
+	fmt.Printf("Average Age: %s\n\n", mergeOracleFormatDuration(qa.QueueHealth.AverageAge))
 
 	// MR table
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
@@ -416,7 +413,7 @@ func outputQueueText(qa *mergeoracle.QueueAnalysis, townRoot string) error {
 			risk,
 			branch,
 			analysis.SizeRisk.FilesChanged,
-			formatDuration(age),
+			mergeOracleFormatDuration(age),
 			warning)
 	}
 	w.Flush()
@@ -486,7 +483,7 @@ func outputAnalysisText(analysis *mergeoracle.MRAnalysis, townRoot string) error
 			fmt.Printf("  After: %s\n", strings.Join(analysis.OptimalWindow.After, ", "))
 		}
 		if analysis.OptimalWindow.EstimatedWait > 0 {
-			fmt.Printf("  Estimated wait: %s\n", formatDuration(analysis.OptimalWindow.EstimatedWait))
+			fmt.Printf("  Estimated wait: %s\n", mergeOracleFormatDuration(analysis.OptimalWindow.EstimatedWait))
 		}
 	}
 
@@ -562,7 +559,7 @@ func printRiskComponent(name string, score int, max int, details string) {
 	fmt.Println()
 }
 
-func formatDuration(d time.Duration) string {
+func mergeOracleFormatDuration(d time.Duration) string {
 	if d < time.Minute {
 		return "< 1m"
 	}

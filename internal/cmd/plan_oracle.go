@@ -3,11 +3,11 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/planoracle/cmd"
 	"github.com/steveyegge/gastown/internal/planoracle/sources"
-	"github.com/steveyegge/gastown/internal/runtime"
 )
 
 func init() {
@@ -50,7 +50,10 @@ Examples:
 
 func init() {
 	// Create beads source for plan-oracle commands
-	workDir := runtime.GetWorkDir()
+	workDir, err := os.Getwd()
+	if err != nil {
+		workDir = "." // Fallback to current directory
+	}
 	beadsSource := sources.NewBeadsSource(workDir)
 
 	// Register subcommands

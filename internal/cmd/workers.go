@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -360,7 +361,7 @@ func collectWorkers(rigs []*rig.Rig) ([]*WorkerInfo, error) {
 		}
 
 		for _, p := range polecats {
-			worker, err := getPolecatWorkerInfo(r, &p, t)
+			worker, err := getPolecatWorkerInfo(r, p, t)
 			if err != nil {
 				continue
 			}
@@ -410,8 +411,11 @@ func getCrewWorkerInfo(r *rig.Rig, name string, t *tmux.Tmux) (*WorkerInfo, erro
 		worker.State = "working"
 
 		// Get last activity
-		if sessInfo, err := t.GetSessionInfo(sessionID); err == nil {
-			worker.LastActivity = sessInfo.LastActivity
+		if sessInfo, err := t.GetSessionInfo(sessionID); err == nil && sessInfo.Activity != "" {
+			// Parse Unix timestamp from tmux
+			if timestamp, err := strconv.ParseInt(sessInfo.Activity, 10, 64); err == nil {
+				worker.LastActivity = time.Unix(timestamp, 0)
+			}
 		}
 	}
 
@@ -444,8 +448,11 @@ func getPolecatWorkerInfo(r *rig.Rig, p *polecat.Polecat, t *tmux.Tmux) (*Worker
 		worker.SessionID = sessionID
 
 		// Get last activity
-		if sessInfo, err := t.GetSessionInfo(sessionID); err == nil {
-			worker.LastActivity = sessInfo.LastActivity
+		if sessInfo, err := t.GetSessionInfo(sessionID); err == nil && sessInfo.Activity != "" {
+			// Parse Unix timestamp from tmux
+			if timestamp, err := strconv.ParseInt(sessInfo.Activity, 10, 64); err == nil {
+				worker.LastActivity = time.Unix(timestamp, 0)
+			}
 		}
 	}
 
@@ -474,16 +481,15 @@ func getWorkerGitStatus(worker *WorkerInfo) (*WorkerGitStatus, error) {
 	}
 
 	// Check for uncommitted files
-	if dirty, err := g.IsDirty(); err == nil && dirty {
+	if gitStatus, err := g.Status(); err == nil && !gitStatus.Clean {
 		status.IsDirty = true
 		// Count files
-		if files, err := g.Status(); err == nil {
-			status.UncommittedFiles = len(files)
-		}
+		status.UncommittedFiles = len(gitStatus.Modified) + len(gitStatus.Added) +
+			len(gitStatus.Deleted) + len(gitStatus.Untracked)
 	}
 
 	// Check commits ahead
-	if ahead, err := g.CommitsAhead("origin/main"); err == nil {
+	if ahead, err := g.CommitsAhead("origin/main", "HEAD"); err == nil {
 		status.CommitsAhead = ahead
 	}
 

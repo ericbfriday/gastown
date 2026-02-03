@@ -154,7 +154,7 @@ func runWorkspaceList(cmd *cobra.Command, args []string) error {
 
 		// Last activity
 		if !ws.LastActivity.IsZero() {
-			ago := formatRelativeTime(ws.LastActivity)
+			ago := formatRelativeTime(ws.LastActivity.Format(time.RFC3339))
 			fmt.Printf("    Last activity: %s\n", style.Dim.Render(ago))
 		}
 	}
@@ -298,9 +298,9 @@ func getWorkspaceGitStatus(wsPath string) (*GitStatusInfo, error) {
 	status.Branch = branch
 
 	// Check if dirty
-	dirty, err := g.IsDirty()
+	gitStatus, err := g.Status()
 	if err == nil {
-		status.Dirty = dirty
+		status.Dirty = !gitStatus.Clean
 	}
 
 	// Get commits ahead/behind

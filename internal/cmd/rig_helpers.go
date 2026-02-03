@@ -34,3 +34,20 @@ func getRig(rigName string) (string, *rig.Rig, error) {
 
 	return townRoot, r, nil
 }
+
+// detectRig finds the town root and detects the rig from the current directory.
+// Returns the town root path and rig instance detected from current working directory.
+func detectRig() (string, *rig.Rig, error) {
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return "", nil, fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+
+	// Detect rig from current directory
+	r, err := rig.FindFromCwd()
+	if err != nil {
+		return "", nil, fmt.Errorf("not in a rig directory: %w", err)
+	}
+
+	return townRoot, r, nil
+}
