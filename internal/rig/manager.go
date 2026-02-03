@@ -2,7 +2,6 @@ package rig
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,13 +14,16 @@ import (
 	"github.com/steveyegge/gastown/internal/claude"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/errors"
 	"github.com/steveyegge/gastown/internal/git"
 )
 
 // Common errors
 var (
-	ErrRigNotFound = errors.New("rig not found")
-	ErrRigExists   = errors.New("rig already exists")
+	ErrRigNotFound = errors.Permanent("rig.NotFound", nil).
+		WithHint("Use 'gt rig list' to see available rigs")
+	ErrRigExists = errors.User("rig.Exists", "rig already exists").
+		WithHint("Use a different rig name or check existing rigs with 'gt rig list'")
 )
 
 // wrapCloneError wraps clone errors with helpful suggestions.
@@ -37,13 +39,29 @@ func wrapCloneError(err error, gitURL string) error {
 			// Try to suggest the SSH equivalent
 			sshURL := convertToSSH(gitURL)
 			if sshURL != "" {
-				return fmt.Errorf("creating bare repo: %w\n\nHint: GitHub no longer supports password authentication.\nTry using SSH instead:\n  gt rig add <name> %s", err, sshURL)
+				return errors.User("rig.AuthenticationFailed", "git authentication failed").
+					WithContext("git_url", gitURL).
+					WithContext("ssh_url", sshURL).
+					WithHint(fmt.Sprintf("GitHub no longer supports password authentication. Try using SSH instead:\n  gt rig add <name> %s", sshURL))
 			}
-			return fmt.Errorf("creating bare repo: %w\n\nHint: GitHub no longer supports password authentication.\nTry using an SSH URL (git@github.com:owner/repo.git) or a personal access token.", err)
+			return errors.User("rig.AuthenticationFailed", "git authentication failed").
+				WithContext("git_url", gitURL).
+				WithHint("GitHub no longer supports password authentication. Try using an SSH URL (git@github.com:owner/repo.git) or a personal access token")
 		}
 	}
 
-	return fmt.Errorf("creating bare repo: %w", err)
+	// Network errors should be transient
+	if strings.Contains(errStr, "Could not resolve host") ||
+		strings.Contains(errStr, "Connection timed out") ||
+		strings.Contains(errStr, "Connection refused") {
+		return errors.Transient("rig.CloneFailed", err).
+			WithContext("git_url", gitURL).
+			WithHint("Check your network connection and try again")
+	}
+
+	return errors.Permanent("rig.CloneFailed", err).
+		WithContext("git_url", gitURL).
+		WithHint("Verify the repository URL is correct and you have access")
 }
 
 // convertToSSH converts an HTTPS GitHub/GitLab URL to SSH format.
@@ -147,10 +165,22 @@ func (m *Manager) loadRig(name string, entry config.RigEntry) (*Rig, error) {
 	// Verify directory exists
 	info, err := os.Stat(rigPath)
 	if err != nil {
-		return nil, fmt.Errorf("rig directory: %w", err)
+		if os.IsNotExist(err) {
+			return nil, errors.Permanent("rig.DirectoryNotFound", err).
+				WithContext("rig_name", name).
+				WithContext("rig_path", rigPath).
+				WithHint(fmt.Sprintf("The rig directory does not exist. Try removing and re-adding the rig:\n  gt rig remove %s\n  gt rig add %s <git-url>", name, name))
+		}
+		return nil, errors.System("rig.DirectoryAccessFailed", err).
+			WithContext("rig_name", name).
+			WithContext("rig_path", rigPath).
+			WithHint("Check file system permissions")
 	}
 	if !info.IsDir() {
-		return nil, fmt.Errorf("not a directory: %s", rigPath)
+		return nil, errors.User("rig.NotADirectory", "rig path is not a directory").
+			WithContext("rig_name", name).
+			WithContext("rig_path", rigPath).
+			WithHint("Remove the conflicting file and re-add the rig")
 	}
 
 	rig := &Rig{
@@ -268,14 +298,20 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 	if strings.ContainsAny(opts.Name, "-. ") {
 		sanitized := strings.NewReplacer("-", "_", ".", "_", " ", "_").Replace(opts.Name)
 		sanitized = strings.ToLower(sanitized)
-		return nil, fmt.Errorf("rig name %q contains invalid characters; hyphens, dots, and spaces are reserved for agent ID parsing. Try %q instead (underscores are allowed)", opts.Name, sanitized)
+		return nil, errors.User("rig.InvalidName", fmt.Sprintf("rig name %q contains invalid characters", opts.Name)).
+			WithContext("rig_name", opts.Name).
+			WithContext("suggested_name", sanitized).
+			WithHint(fmt.Sprintf("Hyphens, dots, and spaces are reserved for agent ID parsing. Try %q instead (underscores are allowed)", sanitized))
 	}
 
 	rigPath := filepath.Join(m.townRoot, opts.Name)
 
 	// Check if directory already exists
 	if _, err := os.Stat(rigPath); err == nil {
-		return nil, fmt.Errorf("directory already exists: %s", rigPath)
+		return nil, errors.User("rig.DirectoryExists", "directory already exists").
+			WithContext("rig_name", opts.Name).
+			WithContext("rig_path", rigPath).
+			WithHint("Remove the existing directory or choose a different rig name")
 	}
 
 	// Track whether user explicitly provided --prefix (before deriving)
@@ -293,7 +329,9 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 
 	// Create container directory
 	if err := os.MkdirAll(rigPath, 0755); err != nil {
-		return nil, fmt.Errorf("creating rig directory: %w", err)
+		return nil, errors.System("rig.CreateDirectoryFailed", err).
+			WithContext("rig_path", rigPath).
+			WithHint("Check file system permissions and available disk space")
 	}
 
 	// Track cleanup on failure (best-effort cleanup)
@@ -318,7 +356,7 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 		},
 	}
 	if err := m.saveRigConfig(rigPath, rigConfig); err != nil {
-		return nil, fmt.Errorf("saving rig config: %w", err)
+		return nil, err // Already wrapped by saveRigConfig
 	}
 
 	// Create shared bare repo as source of truth for refinery and polecats.
@@ -327,15 +365,24 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 	fmt.Printf("  Cloning repository (this may take a moment)...\n")
 	bareRepoPath := filepath.Join(rigPath, ".repo.git")
 	if localRepo != "" {
-		if err := m.git.CloneBareWithReference(opts.GitURL, bareRepoPath, localRepo); err != nil {
+		// Try with network retry for reference clone
+		err := errors.WithNetworkRetry(func() error {
+			return m.git.CloneBareWithReference(opts.GitURL, bareRepoPath, localRepo)
+		})
+		if err != nil {
 			fmt.Printf("  Warning: could not use local repo reference: %v\n", err)
 			_ = os.RemoveAll(bareRepoPath)
-			if err := m.git.CloneBare(opts.GitURL, bareRepoPath); err != nil {
+			// Fallback to regular clone with retry
+			if err := errors.WithNetworkRetry(func() error {
+				return m.git.CloneBare(opts.GitURL, bareRepoPath)
+			}); err != nil {
 				return nil, wrapCloneError(err, opts.GitURL)
 			}
 		}
 	} else {
-		if err := m.git.CloneBare(opts.GitURL, bareRepoPath); err != nil {
+		if err := errors.WithNetworkRetry(func() error {
+			return m.git.CloneBare(opts.GitURL, bareRepoPath)
+		}); err != nil {
 			return nil, wrapCloneError(err, opts.GitURL)
 		}
 	}
@@ -356,7 +403,7 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 	rigConfig.DefaultBranch = defaultBranch
 	// Re-save config with default branch
 	if err := m.saveRigConfig(rigPath, rigConfig); err != nil {
-		return nil, fmt.Errorf("updating rig config with default branch: %w", err)
+		return nil, err // Already wrapped
 	}
 
 	// Create mayor as regular clone (separate from bare repo).
@@ -365,26 +412,38 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 	fmt.Printf("  Creating mayor clone...\n")
 	mayorRigPath := filepath.Join(rigPath, "mayor", "rig")
 	if err := os.MkdirAll(filepath.Dir(mayorRigPath), 0755); err != nil {
-		return nil, fmt.Errorf("creating mayor dir: %w", err)
+		return nil, errors.System("rig.CreateMayorDirFailed", err).
+			WithContext("mayor_path", mayorRigPath).
+			WithHint("Check file system permissions")
 	}
 	if localRepo != "" {
-		if err := m.git.CloneWithReference(opts.GitURL, mayorRigPath, localRepo); err != nil {
+		err := errors.WithNetworkRetry(func() error {
+			return m.git.CloneWithReference(opts.GitURL, mayorRigPath, localRepo)
+		})
+		if err != nil {
 			fmt.Printf("  Warning: could not use local repo reference: %v\n", err)
 			_ = os.RemoveAll(mayorRigPath)
-			if err := m.git.Clone(opts.GitURL, mayorRigPath); err != nil {
-				return nil, fmt.Errorf("cloning for mayor: %w", err)
+			if err := errors.WithNetworkRetry(func() error {
+				return m.git.Clone(opts.GitURL, mayorRigPath)
+			}); err != nil {
+				return nil, wrapCloneError(err, opts.GitURL)
 			}
 		}
 	} else {
-		if err := m.git.Clone(opts.GitURL, mayorRigPath); err != nil {
-			return nil, fmt.Errorf("cloning for mayor: %w", err)
+		if err := errors.WithNetworkRetry(func() error {
+			return m.git.Clone(opts.GitURL, mayorRigPath)
+		}); err != nil {
+			return nil, wrapCloneError(err, opts.GitURL)
 		}
 	}
 
 	// Checkout the default branch for mayor (clone defaults to remote's HEAD, not our configured branch)
 	mayorGit := git.NewGitWithDir("", mayorRigPath)
 	if err := mayorGit.Checkout(defaultBranch); err != nil {
-		return nil, fmt.Errorf("checking out default branch for mayor: %w", err)
+		return nil, errors.Permanent("rig.CheckoutFailed", err).
+			WithContext("branch", defaultBranch).
+			WithContext("mayor_path", mayorRigPath).
+			WithHint(fmt.Sprintf("The branch %q may not exist in the repository. Verify with: git branch -a", defaultBranch))
 	}
 	fmt.Printf("   ✓ Created mayor clone\n")
 
@@ -399,14 +458,17 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 			fmt.Printf("  Detected existing beads prefix '%s' from source repo\n", sourcePrefix)
 			// Only error on mismatch if user explicitly provided --prefix
 			if userProvidedPrefix && opts.BeadsPrefix != sourcePrefix {
-				return nil, fmt.Errorf("prefix mismatch: source repo uses '%s' but --prefix '%s' was provided; use --prefix %s to match existing issues", sourcePrefix, opts.BeadsPrefix, sourcePrefix)
+				return nil, errors.User("rig.PrefixMismatch", "beads prefix mismatch with source repository").
+					WithContext("source_prefix", sourcePrefix).
+					WithContext("provided_prefix", opts.BeadsPrefix).
+					WithHint(fmt.Sprintf("The source repository uses beads prefix '%s'. Use --prefix %s to match existing issues", sourcePrefix, sourcePrefix))
 			}
 			// Use detected prefix (overrides derived prefix)
 			opts.BeadsPrefix = sourcePrefix
 			rigConfig.Beads.Prefix = sourcePrefix
 			// Re-save rig config with detected prefix
 			if err := m.saveRigConfig(rigPath, rigConfig); err != nil {
-				return nil, fmt.Errorf("updating rig config with detected prefix: %w", err)
+				return nil, err // Already wrapped
 			}
 		} else {
 			// Detection failed (no issues yet) - use derived/provided prefix
@@ -431,14 +493,14 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 
 	// Create mayor CLAUDE.md (overrides any from cloned repo)
 	if err := m.createRoleCLAUDEmd(mayorRigPath, "mayor", opts.Name, ""); err != nil {
-		return nil, fmt.Errorf("creating mayor CLAUDE.md: %w", err)
+		return nil, err // Already wrapped
 	}
 
 	// Initialize beads at rig level BEFORE creating worktrees.
 	// This ensures rig/.beads exists so worktree redirects can point to it.
 	fmt.Printf("  Initializing beads database...\n")
 	if err := m.initBeads(rigPath, opts.BeadsPrefix); err != nil {
-		return nil, fmt.Errorf("initializing beads: %w", err)
+		return nil, err // Already wrapped
 	}
 	fmt.Printf("   ✓ Initialized beads (prefix: %s)\n", opts.BeadsPrefix)
 
@@ -457,10 +519,15 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 	fmt.Printf("  Creating refinery worktree...\n")
 	refineryRigPath := filepath.Join(rigPath, "refinery", "rig")
 	if err := os.MkdirAll(filepath.Dir(refineryRigPath), 0755); err != nil {
-		return nil, fmt.Errorf("creating refinery dir: %w", err)
+		return nil, errors.System("rig.CreateRefineryDirFailed", err).
+			WithContext("refinery_path", refineryRigPath).
+			WithHint("Check file system permissions")
 	}
 	if err := bareGit.WorktreeAddExisting(refineryRigPath, defaultBranch); err != nil {
-		return nil, fmt.Errorf("creating refinery worktree: %w", err)
+		return nil, errors.Permanent("rig.WorktreeAddFailed", err).
+			WithContext("refinery_path", refineryRigPath).
+			WithContext("branch", defaultBranch).
+			WithHint("Check git worktree status with: git worktree list")
 	}
 	fmt.Printf("   ✓ Created refinery worktree\n")
 	// Set up beads redirect for refinery (points to rig-level .beads)
@@ -469,7 +536,7 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 	}
 	// Create refinery CLAUDE.md (overrides any from cloned repo)
 	if err := m.createRoleCLAUDEmd(refineryRigPath, "refinery", opts.Name, ""); err != nil {
-		return nil, fmt.Errorf("creating refinery CLAUDE.md: %w", err)
+		return nil, err // Already wrapped
 	}
 	// Create refinery hooks for patrol triggering (at refinery/ level, not rig/)
 	refineryPath := filepath.Dir(refineryRigPath)
@@ -481,7 +548,9 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 	// Create empty crew directory with README (crew members added via gt crew add)
 	crewPath := filepath.Join(rigPath, "crew")
 	if err := os.MkdirAll(crewPath, 0755); err != nil {
-		return nil, fmt.Errorf("creating crew dir: %w", err)
+		return nil, errors.System("rig.CreateCrewDirFailed", err).
+			WithContext("crew_path", crewPath).
+			WithHint("Check file system permissions")
 	}
 	// Create README with instructions
 	readmePath := filepath.Join(crewPath, "README.md")
@@ -503,13 +572,17 @@ gt crew add <name>    # Creates crew/<name>/ with a git clone
 Use crew for your own workspace. Polecats are for batch work dispatch.
 `
 	if err := os.WriteFile(readmePath, []byte(readmeContent), 0644); err != nil {
-		return nil, fmt.Errorf("creating crew README: %w", err)
+		return nil, errors.System("rig.CreateCrewREADMEFailed", err).
+			WithContext("readme_path", readmePath).
+			WithHint("Check file system permissions")
 	}
 
 	// Create witness directory (no clone needed)
 	witnessPath := filepath.Join(rigPath, "witness")
 	if err := os.MkdirAll(witnessPath, 0755); err != nil {
-		return nil, fmt.Errorf("creating witness dir: %w", err)
+		return nil, errors.System("rig.CreateWitnessDirFailed", err).
+			WithContext("witness_path", witnessPath).
+			WithHint("Check file system permissions")
 	}
 	// Create witness hooks for patrol triggering
 	if err := m.createPatrolHooks(witnessPath, runtimeConfig); err != nil {
@@ -519,7 +592,9 @@ Use crew for your own workspace. Polecats are for batch work dispatch.
 	// Create polecats directory (empty)
 	polecatsPath := filepath.Join(rigPath, "polecats")
 	if err := os.MkdirAll(polecatsPath, 0755); err != nil {
-		return nil, fmt.Errorf("creating polecats dir: %w", err)
+		return nil, errors.System("rig.CreatePolecatsDirFailed", err).
+			WithContext("polecats_path", polecatsPath).
+			WithHint("Check file system permissions")
 	}
 
 	// Install Claude settings for all agent directories.
@@ -545,7 +620,7 @@ Use crew for your own workspace. Polecats are for batch work dispatch.
 	// Initialize beads at rig level
 	fmt.Printf("  Initializing beads database...\n")
 	if err := m.initBeads(rigPath, opts.BeadsPrefix); err != nil {
-		return nil, fmt.Errorf("initializing beads: %w", err)
+		return nil, err // Already wrapped
 	}
 	fmt.Printf("   ✓ Initialized beads (prefix: %s)\n", opts.BeadsPrefix)
 
@@ -587,21 +662,46 @@ func (m *Manager) saveRigConfig(rigPath string, cfg *RigConfig) error {
 	configPath := filepath.Join(rigPath, "config.json")
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
-		return err
+		return errors.System("rig.MarshalConfigFailed", err).
+			WithContext("rig_path", rigPath).
+			WithHint("Configuration data is invalid")
 	}
-	return os.WriteFile(configPath, data, 0644)
+
+	// Use file I/O retry for transient filesystem issues
+	if err := errors.WithFileIORetry(func() error {
+		return os.WriteFile(configPath, data, 0644)
+	}); err != nil {
+		return errors.System("rig.WriteConfigFailed", err).
+			WithContext("config_path", configPath).
+			WithHint("Check file system permissions and available disk space")
+	}
+	return nil
 }
 
 // LoadRigConfig reads the rig configuration from config.json.
 func LoadRigConfig(rigPath string) (*RigConfig, error) {
 	configPath := filepath.Join(rigPath, "config.json")
-	data, err := os.ReadFile(configPath)
+
+	// Use file I/O retry for transient read issues
+	data, err := errors.RetryFunc(func() ([]byte, error) {
+		return os.ReadFile(configPath)
+	}, errors.FileIORetryConfig())
 	if err != nil {
-		return nil, err
+		if os.IsNotExist(err) {
+			return nil, errors.Permanent("rig.ConfigNotFound", err).
+				WithContext("config_path", configPath).
+				WithHint("The rig configuration file does not exist. The rig may need to be re-created")
+		}
+		return nil, errors.System("rig.ReadConfigFailed", err).
+			WithContext("config_path", configPath).
+			WithHint("Check file system permissions")
 	}
+
 	var cfg RigConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, err
+		return nil, errors.Permanent("rig.UnmarshalConfigFailed", err).
+			WithContext("config_path", configPath).
+			WithHint("The rig configuration file is corrupted. Check the JSON syntax or re-create the rig")
 	}
 	return &cfg, nil
 }
@@ -613,7 +713,9 @@ func LoadRigConfig(rigPath string) (*RigConfig, error) {
 func (m *Manager) initBeads(rigPath, prefix string) error {
 	// Validate prefix format to prevent command injection from config files
 	if !isValidBeadsPrefix(prefix) {
-		return fmt.Errorf("invalid beads prefix %q: must be alphanumeric with optional hyphens, start with letter, max 20 chars", prefix)
+		return errors.User("rig.InvalidBeadsPrefix", fmt.Sprintf("invalid beads prefix %q", prefix)).
+			WithContext("prefix", prefix).
+			WithHint("Beads prefix must be alphanumeric with optional hyphens, start with letter, and be at most 20 characters")
 	}
 
 	beadsDir := filepath.Join(rigPath, ".beads")
@@ -628,14 +730,18 @@ func (m *Manager) initBeads(rigPath, prefix string) error {
 		}
 		redirectPath := filepath.Join(beadsDir, "redirect")
 		if err := os.WriteFile(redirectPath, []byte("mayor/rig/.beads\n"), 0644); err != nil {
-			return fmt.Errorf("creating redirect file: %w", err)
+			return errors.System("rig.CreateRedirectFailed", err).
+				WithContext("redirect_path", redirectPath).
+				WithHint("Check file system permissions")
 		}
 		return nil
 	}
 
 	// No tracked beads - create local database
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
-		return err
+		return errors.System("rig.CreateBeadsDirFailed", err).
+			WithContext("beads_dir", beadsDir).
+			WithHint("Check file system permissions")
 	}
 
 	// Build environment with explicit BEADS_DIR to prevent bd from
@@ -660,7 +766,9 @@ func (m *Manager) initBeads(rigPath, prefix string) error {
 		configPath := filepath.Join(beadsDir, "config.yaml")
 		configContent := fmt.Sprintf("prefix: %s\n", prefix)
 		if writeErr := os.WriteFile(configPath, []byte(configContent), 0644); writeErr != nil {
-			return writeErr
+			return errors.System("rig.WriteBeadsConfigFailed", writeErr).
+				WithContext("config_path", configPath).
+				WithHint("Check file system permissions")
 		}
 	}
 
@@ -759,7 +867,10 @@ func (m *Manager) initAgentBeads(rigPath, rigName, prefix string) error {
 		}
 
 		if _, err := bd.CreateAgentBead(agent.id, agent.desc, fields); err != nil {
-			return fmt.Errorf("creating %s: %w", agent.id, err)
+			return errors.System("rig.CreateAgentBeadFailed", err).
+				WithContext("agent_id", agent.id).
+				WithContext("role_type", agent.roleType).
+				WithHint("Check that beads is installed and the database is accessible with: bd status")
 		}
 		fmt.Printf("   ✓ Created agent bead: %s\n", agent.id)
 	}
@@ -772,7 +883,9 @@ func (m *Manager) ensureGitignoreEntry(gitignorePath, entry string) error {
 	// Read existing content
 	content, err := os.ReadFile(gitignorePath)
 	if err != nil && !os.IsNotExist(err) {
-		return err
+		return errors.System("rig.ReadGitignoreFailed", err).
+			WithContext("gitignore_path", gitignorePath).
+			WithHint("Check file system permissions")
 	}
 
 	// Check if entry already exists
@@ -786,18 +899,26 @@ func (m *Manager) ensureGitignoreEntry(gitignorePath, entry string) error {
 	// Append entry
 	f, err := os.OpenFile(gitignorePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644) //nolint:gosec // G302: .gitignore should be readable by git tools
 	if err != nil {
-		return err
+		return errors.System("rig.OpenGitignoreFailed", err).
+			WithContext("gitignore_path", gitignorePath).
+			WithHint("Check file system permissions")
 	}
 	defer f.Close()
 
 	// Add newline before if file doesn't end with one
 	if len(content) > 0 && content[len(content)-1] != '\n' {
 		if _, err := f.WriteString("\n"); err != nil {
-			return err
+			return errors.System("rig.WriteGitignoreFailed", err).
+				WithContext("gitignore_path", gitignorePath).
+				WithHint("Check file system permissions and disk space")
 		}
 	}
-	_, err = f.WriteString(entry + "\n")
-	return err
+	if _, err := f.WriteString(entry + "\n"); err != nil {
+		return errors.System("rig.WriteGitignoreFailed", err).
+			WithContext("gitignore_path", gitignorePath).
+			WithHint("Check file system permissions and disk space")
+	}
+	return nil
 }
 
 // deriveBeadsPrefix generates a beads prefix from a rig name.
@@ -1040,7 +1161,9 @@ func (m *Manager) createPatrolHooks(workspacePath string, runtimeConfig *config.
 
 	settingsDir := filepath.Join(workspacePath, runtimeConfig.Hooks.Dir)
 	if err := os.MkdirAll(settingsDir, 0755); err != nil {
-		return fmt.Errorf("creating settings dir: %w", err)
+		return errors.System("rig.CreateSettingsDirFailed", err).
+			WithContext("settings_dir", settingsDir).
+			WithHint("Check file system permissions")
 	}
 
 	// Standard patrol hooks - same as deacon
@@ -1153,7 +1276,9 @@ func (m *Manager) createPluginDirectories(rigPath string) error {
 	// Town-level plugins directory
 	townPluginsDir := filepath.Join(m.townRoot, "plugins")
 	if err := os.MkdirAll(townPluginsDir, 0755); err != nil {
-		return fmt.Errorf("creating town plugins directory: %w", err)
+		return errors.System("rig.CreateTownPluginsDirFailed", err).
+			WithContext("plugins_dir", townPluginsDir).
+			WithHint("Check file system permissions")
 	}
 
 	// Create a README in town plugins if it doesn't exist
@@ -1186,7 +1311,9 @@ See docs/deacon-plugins.md for full documentation.
 	// Rig-level plugins directory
 	rigPluginsDir := filepath.Join(rigPath, "plugins")
 	if err := os.MkdirAll(rigPluginsDir, 0755); err != nil {
-		return fmt.Errorf("creating rig plugins directory: %w", err)
+		return errors.System("rig.CreateRigPluginsDirFailed", err).
+			WithContext("plugins_dir", rigPluginsDir).
+			WithHint("Check file system permissions")
 	}
 
 	// Add plugins/ and .repo.git/ to rig .gitignore

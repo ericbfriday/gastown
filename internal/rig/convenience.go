@@ -1,12 +1,12 @@
 package rig
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/errors"
 	"github.com/steveyegge/gastown/internal/git"
 )
 
@@ -19,7 +19,9 @@ func Load(rigPath string) (*Rig, error) {
 	// Load town config to get rig entry
 	rigsConfig, err := config.LoadRigsConfig(townRoot)
 	if err != nil {
-		return nil, fmt.Errorf("loading rigs config: %w", err)
+		return nil, errors.Permanent("rig.LoadConfigFailed", err).
+			WithContext("town_root", townRoot).
+			WithHint("Verify the town configuration exists and is valid")
 	}
 
 	// Get rig name from path
@@ -28,7 +30,9 @@ func Load(rigPath string) (*Rig, error) {
 	// Get rig entry
 	entry, ok := rigsConfig.Rigs[rigName]
 	if !ok {
-		return nil, fmt.Errorf("rig %q not found in config", rigName)
+		return nil, errors.Permanent("rig.NotFoundInConfig", nil).
+			WithContext("rig_name", rigName).
+			WithHint("Use 'gt rig list' to see available rigs")
 	}
 
 	// Create manager and load rig
@@ -41,7 +45,8 @@ func Load(rigPath string) (*Rig, error) {
 func FindFromCwd() (*Rig, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return nil, err
+		return nil, errors.System("rig.GetCwdFailed", err).
+			WithHint("Unable to determine current working directory")
 	}
 	return FindRigFromPath(cwd)
 }
@@ -51,7 +56,9 @@ func FindRigFromPath(path string) (*Rig, error) {
 	// Get absolute path
 	absPath, err := filepath.Abs(path)
 	if err != nil {
-		return nil, err
+		return nil, errors.System("rig.AbsPathFailed", err).
+			WithContext("path", path).
+			WithHint("Unable to resolve absolute path")
 	}
 
 	// Walk up to find town root (directory containing config/ dir)
@@ -67,7 +74,9 @@ func FindRigFromPath(path string) (*Rig, error) {
 		parent := filepath.Dir(current)
 		if parent == current {
 			// Reached filesystem root without finding town
-			return nil, fmt.Errorf("not in a town: no config/ directory found")
+			return nil, errors.User("rig.NotInTown", "not in a town").
+				WithContext("path", absPath).
+				WithHint("Navigate to a Gas Town directory (containing config/) or initialize a new town with 'gt install'")
 		}
 		current = parent
 	}
@@ -75,7 +84,9 @@ func FindRigFromPath(path string) (*Rig, error) {
 	// Load rigs config
 	rigsConfig, err := config.LoadRigsConfig(townRoot)
 	if err != nil {
-		return nil, fmt.Errorf("loading rigs config: %w", err)
+		return nil, errors.Permanent("rig.LoadConfigFailed", err).
+			WithContext("town_root", townRoot).
+			WithHint("Verify the town configuration exists and is valid")
 	}
 
 	// Create manager to discover rigs
@@ -83,7 +94,7 @@ func FindRigFromPath(path string) (*Rig, error) {
 	mgr := NewManager(townRoot, rigsConfig, g)
 	rigs, err := mgr.DiscoverRigs()
 	if err != nil {
-		return nil, err
+		return nil, err // Already wrapped by DiscoverRigs
 	}
 
 	// Find rig containing the given path
@@ -93,5 +104,7 @@ func FindRigFromPath(path string) (*Rig, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("no rig found containing path: %s", absPath)
+	return nil, errors.Permanent("rig.NoRigFound", nil).
+		WithContext("path", absPath).
+		WithHint("Navigate to a rig directory or use 'gt rig list' to see available rigs")
 }

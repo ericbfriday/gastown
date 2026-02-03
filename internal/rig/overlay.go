@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/errors"
 )
 
 // CopyOverlay copies files from <rigPath>/.runtime/overlay/ to the destination path.
@@ -33,7 +35,9 @@ func CopyOverlay(rigPath, destPath string) error {
 			// No overlay directory - not an error, just nothing to copy
 			return nil
 		}
-		return fmt.Errorf("reading overlay dir: %w", err)
+		return errors.System("rig.ReadOverlayDirFailed", err).
+			WithContext("overlay_dir", overlayDir).
+			WithHint("Check file system permissions")
 	}
 
 	// Copy each file (not directories) from overlay to destination
@@ -71,7 +75,10 @@ func EnsureGitignorePatterns(worktreePath string) error {
 
 	// Read existing gitignore content
 	var existingContent string
-	if data, err := os.ReadFile(gitignorePath); err == nil {
+	data, err := errors.RetryFunc(func() ([]byte, error) {
+		return os.ReadFile(gitignorePath)
+	}, errors.FileIORetryConfig())
+	if err == nil {
 		existingContent = string(data)
 	}
 
@@ -100,25 +107,34 @@ func EnsureGitignorePatterns(worktreePath string) error {
 	// Append missing patterns
 	f, err := os.OpenFile(gitignorePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		return fmt.Errorf("opening .gitignore: %w", err)
+		return errors.System("rig.OpenGitignoreFailed", err).
+			WithContext("gitignore_path", gitignorePath).
+			WithHint("Check file system permissions")
 	}
 	defer f.Close()
 
 	// Add header if appending to existing file
 	if existingContent != "" && !strings.HasSuffix(existingContent, "\n") {
 		if _, err := f.WriteString("\n"); err != nil {
-			return err
+			return errors.System("rig.WriteGitignoreFailed", err).
+				WithContext("gitignore_path", gitignorePath).
+				WithHint("Check file system permissions and disk space")
 		}
 	}
 	if existingContent != "" {
 		if _, err := f.WriteString("\n# Gas Town (added by gt)\n"); err != nil {
-			return err
+			return errors.System("rig.WriteGitignoreFailed", err).
+				WithContext("gitignore_path", gitignorePath).
+				WithHint("Check file system permissions and disk space")
 		}
 	}
 
 	for _, pattern := range missing {
 		if _, err := f.WriteString(pattern + "\n"); err != nil {
-			return err
+			return errors.System("rig.WriteGitignoreFailed", err).
+				WithContext("gitignore_path", gitignorePath).
+				WithContext("pattern", pattern).
+				WithHint("Check file system permissions and disk space")
 		}
 	}
 
@@ -130,26 +146,38 @@ func copyFilePreserveMode(src, dst string) error {
 	// Get source file info for permissions
 	srcInfo, err := os.Stat(src)
 	if err != nil {
-		return fmt.Errorf("stat source: %w", err)
+		return errors.System("rig.StatSourceFailed", err).
+			WithContext("source", src).
+			WithHint("Check that the source file exists and is readable")
 	}
 
 	// Open source file
 	srcFile, err := os.Open(src)
 	if err != nil {
-		return fmt.Errorf("open source: %w", err)
+		return errors.System("rig.OpenSourceFailed", err).
+			WithContext("source", src).
+			WithHint("Check file system permissions")
 	}
 	defer srcFile.Close()
 
 	// Create destination file with same permissions
 	dstFile, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, srcInfo.Mode().Perm())
 	if err != nil {
-		return fmt.Errorf("create destination: %w", err)
+		return errors.System("rig.CreateDestinationFailed", err).
+			WithContext("destination", dst).
+			WithHint("Check file system permissions and disk space")
 	}
 	defer dstFile.Close()
 
-	// Copy contents
-	if _, err := io.Copy(dstFile, srcFile); err != nil {
-		return fmt.Errorf("copy contents: %w", err)
+	// Copy contents with retry for transient failures
+	if err := errors.WithFileIORetry(func() error {
+		_, err := io.Copy(dstFile, srcFile)
+		return err
+	}); err != nil {
+		return errors.System("rig.CopyContentsFailed", err).
+			WithContext("source", src).
+			WithContext("destination", dst).
+			WithHint("Check disk space and file system integrity")
 	}
 
 	return nil

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/errors"
 	"github.com/steveyegge/gastown/internal/git"
 )
 
@@ -156,8 +157,11 @@ func TestGetRigNotFound(t *testing.T) {
 	manager := NewManager(root, rigsConfig, git.NewGit(root))
 
 	_, err := manager.GetRig("nonexistent")
-	if err != ErrRigNotFound {
-		t.Errorf("GetRig = %v, want ErrRigNotFound", err)
+	if !errors.Is(err, ErrRigNotFound) {
+		t.Errorf("GetRig error check failed: got %v, want error wrapping ErrRigNotFound", err)
+	}
+	if err == nil {
+		t.Error("GetRig should return error for nonexistent rig")
 	}
 }
 
@@ -195,8 +199,11 @@ func TestRemoveRigNotFound(t *testing.T) {
 	manager := NewManager(root, rigsConfig, git.NewGit(root))
 
 	err := manager.RemoveRig("nonexistent")
-	if err != ErrRigNotFound {
-		t.Errorf("RemoveRig = %v, want ErrRigNotFound", err)
+	if !errors.Is(err, ErrRigNotFound) {
+		t.Errorf("RemoveRig error check failed: got %v, want error wrapping ErrRigNotFound", err)
+	}
+	if err == nil {
+		t.Error("RemoveRig should return error for nonexistent rig")
 	}
 }
 
