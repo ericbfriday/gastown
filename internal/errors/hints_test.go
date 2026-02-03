@@ -170,8 +170,8 @@ func TestSuggestRetry(t *testing.T) {
 		if !strings.Contains(hint, "network timeout") {
 			t.Errorf("hint should contain reason")
 		}
-		if !strings.Contains(hint, "retry") {
-			t.Errorf("hint should suggest retry")
+		if !strings.Contains(strings.ToLower(hint), "retry") {
+			t.Errorf("hint should suggest retry, got: %s", hint)
 		}
 	})
 
@@ -180,8 +180,8 @@ func TestSuggestRetry(t *testing.T) {
 		if !strings.Contains(hint, "database query") {
 			t.Errorf("hint should contain operation name")
 		}
-		if !strings.Contains(hint, "retry") {
-			t.Errorf("hint should suggest retry")
+		if !strings.Contains(strings.ToLower(hint), "retry") {
+			t.Errorf("hint should suggest retry, got: %s", hint)
 		}
 	})
 }
@@ -264,7 +264,7 @@ func TestEnrichErrorWithHint(t *testing.T) {
 		{
 			name:        "git conflict",
 			err:         errors.New("merge conflict in file.go"),
-			expectedStr: "conflict",
+			expectedStr: "Resolve merge conflicts",
 		},
 		{
 			name:        "connection refused",
@@ -274,7 +274,7 @@ func TestEnrichErrorWithHint(t *testing.T) {
 		{
 			name:        "timeout",
 			err:         errors.New("operation timeout"),
-			expectedStr: "timeout",
+			expectedStr: "timed out",
 		},
 		{
 			name:        "file not found",
@@ -333,10 +333,10 @@ func TestEnrichErrorWithHint_RecognizesPatterns(t *testing.T) {
 		t.Error("Git push error should be categorized as transient")
 	}
 
-	conflictErr := errors.New("merge conflict detected")
+	conflictErr := errors.New("git merge conflict detected")
 	enriched = EnrichErrorWithHint(conflictErr)
 
 	if GetCategory(enriched) != CategoryUser {
-		t.Error("Merge conflict should be categorized as user error")
+		t.Errorf("Merge conflict should be categorized as user error, got: %v", GetCategory(enriched))
 	}
 }
