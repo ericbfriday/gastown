@@ -2,13 +2,13 @@ package mail
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/errors"
 	"github.com/steveyegge/gastown/internal/hooks"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -16,13 +16,16 @@ import (
 )
 
 // ErrUnknownList indicates a mailing list name was not found in configuration.
-var ErrUnknownList = errors.New("unknown mailing list")
+var ErrUnknownList = errors.User("mail.UnknownList", "unknown mailing list").
+	WithHint("Check available lists with: grep -A 10 'lists:' ~/.gastown/config/messaging.yaml")
 
 // ErrUnknownQueue indicates a queue name was not found in configuration.
-var ErrUnknownQueue = errors.New("unknown queue")
+var ErrUnknownQueue = errors.User("mail.UnknownQueue", "unknown queue").
+	WithHint("Check available queues with: grep -A 10 'queues:' ~/.gastown/config/messaging.yaml")
 
 // ErrUnknownAnnounce indicates an announce channel name was not found in configuration.
-var ErrUnknownAnnounce = errors.New("unknown announce channel")
+var ErrUnknownAnnounce = errors.User("mail.UnknownAnnounce", "unknown announce channel").
+	WithHint("Check available announce channels with: grep -A 10 'announces:' ~/.gastown/config/messaging.yaml")
 
 // Router handles message delivery via beads.
 // It routes messages to the correct beads database based on address:
@@ -100,21 +103,25 @@ func parseChannelName(address string) string {
 // expandFromConfig is a generic helper for config-based expansion.
 // It loads the messaging config and calls the getter to extract the desired value.
 // This consolidates the common pattern of: check townRoot, load config, lookup in map.
-func expandFromConfig[T any](r *Router, name string, getter func(*config.MessagingConfig) (T, bool), errType error) (T, error) {
+func expandFromConfig[T any](r *Router, name string, getter func(*config.MessagingConfig) (T, bool), errType *errors.Error) (T, error) {
 	var zero T
 	if r.townRoot == "" {
-		return zero, fmt.Errorf("%w: %s (no town root)", errType, name)
+		return zero, errors.System("mail.expandFromConfig", fmt.Errorf("no town root")).
+			WithContext("name", name).
+			WithHint("Ensure you're running within a town directory (contains mayor/town.json)")
 	}
 
 	configPath := config.MessagingConfigPath(r.townRoot)
 	cfg, err := config.LoadMessagingConfig(configPath)
 	if err != nil {
-		return zero, fmt.Errorf("loading messaging config: %w", err)
+		return zero, errors.Transient("mail.LoadMessagingConfig", err).
+			WithContext("config_path", configPath).
+			WithHint("Check that messaging config exists and is readable")
 	}
 
 	result, ok := getter(cfg)
 	if !ok {
-		return zero, fmt.Errorf("%w: %s", errType, name)
+		return zero, errType.WithContext("name", name)
 	}
 
 	return result, nil
@@ -132,7 +139,9 @@ func (r *Router) expandList(listName string) ([]string, error) {
 	}
 
 	if len(recipients) == 0 {
-		return nil, fmt.Errorf("%w: %s (empty list)", ErrUnknownList, listName)
+		return nil, errors.User("mail.EmptyList", "mailing list has no recipients").
+			WithContext("list_name", listName).
+			WithHint("Add recipients to the list in messaging config or use a different list")
 	}
 
 	return recipients, nil
@@ -192,7 +201,9 @@ func (r *Router) resolveBeadsDir(_ string) string { // address unused: all mail 
 
 func (r *Router) ensureCustomTypes(beadsDir string) error {
 	if err := beads.EnsureCustomTypes(beadsDir); err != nil {
-		return fmt.Errorf("ensuring custom types: %w", err)
+		return errors.Transient("mail.EnsureCustomTypes", err).
+			WithContext("beads_dir", beadsDir).
+			WithHint("Check beads installation and permissions: bd --version")
 	}
 	return nil
 }
@@ -395,7 +406,9 @@ func parseAgentAddressFromDescription(desc string) string {
 func (r *Router) ResolveGroupAddress(address string) ([]string, error) {
 	group := parseGroupAddress(address)
 	if group == nil {
-		return nil, fmt.Errorf("invalid group address: %s", address)
+		return nil, errors.User("mail.InvalidGroupAddress", "invalid group address format").
+			WithContext("address", address).
+			WithHint("Valid formats: @town, @rig/<name>, @crew/<rig>, @polecats/<rig>, @witnesses, @dogs, @overseer")
 	}
 	return r.resolveGroup(group)
 }
@@ -404,7 +417,8 @@ func (r *Router) ResolveGroupAddress(address string) ([]string, error) {
 // Returns the list of resolved addresses and any error.
 func (r *Router) resolveGroup(group *ParsedGroup) ([]string, error) {
 	if group == nil {
-		return nil, errors.New("nil group")
+		return nil, errors.System("mail.ResolveGroup", fmt.Errorf("nil group")).
+			WithHint("This is an internal error - please report a bug")
 	}
 
 	switch group.Type {
@@ -419,7 +433,10 @@ func (r *Router) resolveGroup(group *ParsedGroup) ([]string, error) {
 	case GroupTypeRigRole:
 		return r.resolveAgentsByRole(group.RoleType, group.Rig)
 	default:
-		return nil, fmt.Errorf("unknown group type: %s", group.Type)
+		return nil, errors.User("mail.UnknownGroupType", "unknown group type").
+			WithContext("group_type", group.Type).
+			WithContext("original_address", group.Original).
+			WithHint("Supported group formats: @town, @rig/<name>, @crew/<rig>, @polecats/<rig>, @witnesses, @dogs")
 	}
 }
 
@@ -427,14 +444,17 @@ func (r *Router) resolveGroup(group *ParsedGroup) ([]string, error) {
 // Loads the overseer config and returns "overseer" as the address.
 func (r *Router) resolveOverseer() ([]string, error) {
 	if r.townRoot == "" {
-		return nil, errors.New("town root not set, cannot resolve @overseer")
+		return nil, errors.System("mail.ResolveOverseer", fmt.Errorf("town root not set")).
+			WithHint("Ensure you're running within a town directory (contains mayor/town.json)")
 	}
 
 	// Load overseer config to verify it exists
 	configPath := config.OverseerConfigPath(r.townRoot)
 	_, err := config.LoadOverseerConfig(configPath)
 	if err != nil {
-		return nil, fmt.Errorf("resolving @overseer: %w", err)
+		return nil, errors.Transient("mail.LoadOverseerConfig", err).
+			WithContext("config_path", configPath).
+			WithHint("Create overseer config with: gt overseer init")
 	}
 
 	// Return the overseer address
@@ -516,12 +536,17 @@ func (r *Router) queryAgents(descContains string) ([]*agentBead, error) {
 
 	stdout, err := runBdCommand(args, filepath.Dir(beadsDir), beadsDir)
 	if err != nil {
-		return nil, fmt.Errorf("querying agents: %w", err)
+		return nil, errors.Transient("mail.QueryAgents", err).
+			WithContext("beads_dir", beadsDir).
+			WithContext("desc_contains", descContains).
+			WithHint("Check beads database is accessible: bd list --type=agent")
 	}
 
 	var agents []*agentBead
 	if err := json.Unmarshal(stdout, &agents); err != nil {
-		return nil, fmt.Errorf("parsing agent query result: %w", err)
+		return nil, errors.Permanent("mail.ParseAgents", err).
+			WithContext("beads_dir", beadsDir).
+			WithHint("Beads output format may have changed - verify with: bd list --type=agent --json")
 	}
 
 	// Filter for open agents only (closed agents are inactive)
@@ -601,16 +626,22 @@ func (r *Router) Send(msg *Message) error {
 func (r *Router) sendToGroup(msg *Message) error {
 	group := parseGroupAddress(msg.To)
 	if group == nil {
-		return fmt.Errorf("invalid group address: %s", msg.To)
+		return errors.User("mail.InvalidGroupAddress", "invalid group address format").
+			WithContext("address", msg.To).
+			WithHint("Valid formats: @town, @rig/<name>, @crew/<rig>, @polecats/<rig>, @witnesses, @dogs, @overseer")
 	}
 
 	recipients, err := r.resolveGroup(group)
 	if err != nil {
-		return fmt.Errorf("resolving group %s: %w", msg.To, err)
+		return errors.Transient("mail.ResolveGroup", err).
+			WithContext("group_address", msg.To).
+			WithContext("sender", msg.From)
 	}
 
 	if len(recipients) == 0 {
-		return fmt.Errorf("no recipients found for group: %s", msg.To)
+		return errors.Permanent("mail.EmptyGroup", fmt.Errorf("no recipients found")).
+			WithContext("group_address", msg.To).
+			WithHint("Group has no members - check agent status with: bd list --type=agent")
 	}
 
 	// Fan-out: send a copy to each recipient
@@ -626,7 +657,10 @@ func (r *Router) sendToGroup(msg *Message) error {
 	}
 
 	if len(errs) > 0 {
-		return fmt.Errorf("some group sends failed: %s", strings.Join(errs, "; "))
+		return errors.Transient("mail.GroupFanOut", fmt.Errorf("some group sends failed")).
+			WithContext("group_address", msg.To).
+			WithContext("failed_recipients", strings.Join(errs, "; ")).
+			WithHint("Check failed recipients and retry: " + strings.Join(errs, "; "))
 	}
 
 	return nil
@@ -643,7 +677,9 @@ func (r *Router) validateRecipient(identity string) error {
 	// Query all agents and check if any match this identity
 	agents, err := r.queryAgents("")
 	if err != nil {
-		return fmt.Errorf("failed to query agents: %w", err)
+		return errors.Transient("mail.QueryAgents", err).
+			WithContext("identity", identity).
+			WithHint("Check beads database is accessible: bd list --type=agent")
 	}
 
 	for _, agent := range agents {
@@ -652,7 +688,9 @@ func (r *Router) validateRecipient(identity string) error {
 		}
 	}
 
-	return fmt.Errorf("no agent found")
+	return errors.Permanent("mail.RecipientNotFound", fmt.Errorf("no agent found")).
+		WithContext("recipient", identity).
+		WithHint("Valid agent formats: mayor/, deacon/, rig/name, rig/crew/name. Check agents with: bd list --type=agent")
 }
 
 // sendToSingle sends a message to a single recipient.
@@ -662,7 +700,10 @@ func (r *Router) sendToSingle(msg *Message) error {
 
 	// Validate recipient exists
 	if err := r.validateRecipient(toIdentity); err != nil {
-		return fmt.Errorf("invalid recipient %q: %w", msg.To, err)
+		return errors.Permanent("mail.InvalidRecipient", err).
+			WithContext("recipient", msg.To).
+			WithContext("sender", msg.From).
+			WithContext("subject", msg.Subject)
 	}
 
 	// Build labels for from/thread/reply-to/cc
@@ -710,7 +751,12 @@ func (r *Router) sendToSingle(msg *Message) error {
 	}
 	_, err := runBdCommand(args, filepath.Dir(beadsDir), beadsDir)
 	if err != nil {
-		return fmt.Errorf("sending message: %w", err)
+		return errors.Transient("mail.CreateMessage", err).
+			WithContext("recipient", msg.To).
+			WithContext("sender", msg.From).
+			WithContext("subject", msg.Subject).
+			WithContext("beads_dir", beadsDir).
+			WithHint("Check beads is installed and database is accessible: bd --version")
 	}
 
 	// Notify recipient if they have an active session (best-effort notification)
@@ -752,7 +798,10 @@ func (r *Router) sendToList(msg *Message) error {
 
 	// If all sends failed, return the last error
 	if successCount == 0 && lastErr != nil {
-		return fmt.Errorf("sending to list %s: %w", listName, lastErr)
+		return errors.Transient("mail.ListFanOut", lastErr).
+			WithContext("list_name", listName).
+			WithContext("recipient_count", len(recipients)).
+			WithHint("Check recipient addresses are valid and retry")
 	}
 
 	return nil
@@ -763,7 +812,9 @@ func (r *Router) sendToList(msg *Message) error {
 // This is exported for use by commands that want to show fan-out details.
 func (r *Router) ExpandListAddress(address string) ([]string, error) {
 	if !isListAddress(address) {
-		return nil, fmt.Errorf("not a list address: %s", address)
+		return nil, errors.User("mail.NotListAddress", "address is not a list").
+			WithContext("address", address).
+			WithHint("List addresses must start with 'list:' prefix")
 	}
 	return r.expandList(parseListName(address))
 }
@@ -826,7 +877,11 @@ func (r *Router) sendToQueue(msg *Message) error {
 	}
 	_, err = runBdCommand(args, filepath.Dir(beadsDir), beadsDir)
 	if err != nil {
-		return fmt.Errorf("sending to queue %s: %w", queueName, err)
+		return errors.Transient("mail.CreateQueueMessage", err).
+			WithContext("queue_name", queueName).
+			WithContext("sender", msg.From).
+			WithContext("subject", msg.Subject).
+			WithHint("Check queue exists and beads is accessible: bd list --type=message --assignee=queue:" + queueName)
 	}
 
 	// No notification for queue messages - workers poll or check on their own schedule
@@ -900,7 +955,11 @@ func (r *Router) sendToAnnounce(msg *Message) error {
 	}
 	_, err = runBdCommand(args, filepath.Dir(beadsDir), beadsDir)
 	if err != nil {
-		return fmt.Errorf("sending to announce %s: %w", announceName, err)
+		return errors.Transient("mail.CreateAnnounceMessage", err).
+			WithContext("announce_name", announceName).
+			WithContext("sender", msg.From).
+			WithContext("subject", msg.Subject).
+			WithHint("Check announce channel exists and beads is accessible")
 	}
 
 	// No notification for announce messages - readers poll or check on their own schedule
@@ -922,13 +981,19 @@ func (r *Router) sendToChannel(msg *Message) error {
 	b := beads.New(r.townRoot)
 	_, fields, err := b.GetChannelBead(channelName)
 	if err != nil {
-		return fmt.Errorf("getting channel %s: %w", channelName, err)
+		return errors.Transient("mail.GetChannel", err).
+			WithContext("channel_name", channelName).
+			WithHint("Check channel exists with: bd list --type=channel")
 	}
 	if fields == nil {
-		return fmt.Errorf("channel not found: %s", channelName)
+		return errors.Permanent("mail.ChannelNotFound", fmt.Errorf("channel not found")).
+			WithContext("channel_name", channelName).
+			WithHint("Create channel with: bd channel create " + channelName)
 	}
 	if fields.Status == beads.ChannelStatusClosed {
-		return fmt.Errorf("channel %s is closed", channelName)
+		return errors.User("mail.ChannelClosed", "channel is closed").
+			WithContext("channel_name", channelName).
+			WithHint("Reopen channel with: bd channel reopen " + channelName)
 	}
 
 	// Build labels for from/thread/reply-to/cc plus channel metadata
@@ -976,7 +1041,11 @@ func (r *Router) sendToChannel(msg *Message) error {
 	}
 	_, err = runBdCommand(args, filepath.Dir(beadsDir), beadsDir)
 	if err != nil {
-		return fmt.Errorf("sending to channel %s: %w", channelName, err)
+		return errors.Transient("mail.CreateChannelMessage", err).
+			WithContext("channel_name", channelName).
+			WithContext("sender", msg.From).
+			WithContext("subject", msg.Subject).
+			WithHint("Check channel is open and beads is accessible")
 	}
 
 	// Enforce channel retention policy (on-write cleanup)
@@ -1028,7 +1097,9 @@ func (r *Router) pruneAnnounce(announceName string, retainCount int) error {
 
 	stdout, err := runBdCommand(args, filepath.Dir(beadsDir), beadsDir)
 	if err != nil {
-		return fmt.Errorf("querying announce messages: %w", err)
+		return errors.Transient("mail.QueryAnnounceMessages", err).
+			WithContext("announce_name", announceName).
+			WithHint("Check beads database is accessible")
 	}
 
 	// Parse message list
@@ -1036,7 +1107,9 @@ func (r *Router) pruneAnnounce(announceName string, retainCount int) error {
 		ID string `json:"id"`
 	}
 	if err := json.Unmarshal(stdout, &messages); err != nil {
-		return fmt.Errorf("parsing announce messages: %w", err)
+		return errors.Permanent("mail.ParseAnnounceMessages", err).
+			WithContext("announce_name", announceName).
+			WithHint("Beads output format may have changed")
 	}
 
 	// Calculate how many to delete (we're about to add 1 more)

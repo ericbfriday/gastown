@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/errors"
 )
 
 // RecipientType indicates the type of resolved recipient.
@@ -93,6 +94,13 @@ func (r *Resolver) resolveAgentAddress(address string) ([]Recipient, error) {
 		return r.resolvePattern(address)
 	}
 
+	// Validate address format
+	if !strings.Contains(address, "/") {
+		return nil, errors.User("mail.InvalidAgentAddress", "agent address must contain '/' separator").
+			WithContext("address", address).
+			WithHint("Valid formats: rig/name, mayor/, deacon/, rig/crew/name")
+	}
+
 	// Direct address - single recipient
 	return []Recipient{{
 		Address: address,
@@ -104,13 +112,16 @@ func (r *Resolver) resolveAgentAddress(address string) ([]Recipient, error) {
 // Patterns like "*/witness" or "gastown/*" are expanded.
 func (r *Resolver) resolvePattern(pattern string) ([]Recipient, error) {
 	if r.beads == nil {
-		return nil, fmt.Errorf("beads not available for pattern resolution")
+		return nil, errors.System("mail.BeadsNotAvailable", fmt.Errorf("beads not available")).
+			WithHint("Initialize beads connection before resolving patterns")
 	}
 
 	// Get all agent beads
 	agents, err := r.beads.ListAgentBeads()
 	if err != nil {
-		return nil, fmt.Errorf("listing agents: %w", err)
+		return nil, errors.Transient("mail.ListAgents", err).
+			WithContext("pattern", pattern).
+			WithHint("Check beads database is accessible: bd list --type=agent")
 	}
 
 	var recipients []Recipient
@@ -126,7 +137,9 @@ func (r *Resolver) resolvePattern(pattern string) ([]Recipient, error) {
 	}
 
 	if len(recipients) == 0 {
-		return nil, fmt.Errorf("no agents match pattern: %s", pattern)
+		return nil, errors.Permanent("mail.NoMatchingAgents", fmt.Errorf("no agents match pattern")).
+			WithContext("pattern", pattern).
+			WithHint("Pattern uses wildcards like */name or rig/*. Check agents with: bd list --type=agent")
 	}
 
 	return recipients, nil
@@ -219,7 +232,9 @@ func (r *Resolver) resolveByName(name string) ([]Recipient, error) {
 	}
 
 	if conflictCount == 0 {
-		return nil, fmt.Errorf("unknown address: %s (not a group, queue, or channel)", name)
+		return nil, errors.User("mail.UnknownAddress", "address not found").
+			WithContext("address", name).
+			WithHint("Address must be: an agent (rig/name), group (group:name), queue (queue:name), or channel (channel:name)")
 	}
 
 	if conflictCount > 1 {
@@ -233,8 +248,10 @@ func (r *Resolver) resolveByName(name string) ([]Recipient, error) {
 		if foundChannel {
 			types = append(types, "channel:"+name)
 		}
-		return nil, fmt.Errorf("ambiguous address %q: matches multiple types. Use explicit prefix: %s",
-			name, strings.Join(types, ", "))
+		return nil, errors.User("mail.AmbiguousAddress", "address matches multiple types").
+			WithContext("address", name).
+			WithContext("possible_types", strings.Join(types, ", ")).
+			WithHint(fmt.Sprintf("Use explicit prefix: %s", strings.Join(types, ", ")))
 	}
 
 	// Single match - resolve it
@@ -250,15 +267,20 @@ func (r *Resolver) resolveByName(name string) ([]Recipient, error) {
 // resolveBeadsGroup resolves a beads-native group by name.
 func (r *Resolver) resolveBeadsGroup(name string) ([]Recipient, error) {
 	if r.beads == nil {
-		return nil, fmt.Errorf("beads not available")
+		return nil, errors.System("mail.BeadsNotAvailable", fmt.Errorf("beads not available")).
+			WithHint("Initialize beads connection before resolving groups")
 	}
 
 	_, fields, err := r.beads.LookupGroupByName(name)
 	if err != nil {
-		return nil, err
+		return nil, errors.Transient("mail.LookupGroup", err).
+			WithContext("group_name", name).
+			WithHint("Check beads database is accessible")
 	}
 	if fields == nil {
-		return nil, fmt.Errorf("group not found: %s", name)
+		return nil, errors.Permanent("mail.GroupNotFound", fmt.Errorf("group not found")).
+			WithContext("group_name", name).
+			WithHint("Create group with: bd create 'Group: " + name + "' --type=group")
 	}
 
 	return r.expandGroupMembers(fields)

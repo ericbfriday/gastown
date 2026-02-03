@@ -474,7 +474,7 @@ func TestMessageValidate(t *testing.T) {
 				Subject: "Test",
 			},
 			wantErr: true,
-			errMsg:  "must have exactly one of",
+			errMsg:  "routing target",
 		},
 		{
 			name: "both to and queue",
@@ -486,7 +486,7 @@ func TestMessageValidate(t *testing.T) {
 				Subject: "Test",
 			},
 			wantErr: true,
-			errMsg:  "mutually exclusive",
+			errMsg:  "multiple routing targets",
 		},
 		{
 			name: "both to and channel",
@@ -498,7 +498,7 @@ func TestMessageValidate(t *testing.T) {
 				Subject: "Test",
 			},
 			wantErr: true,
-			errMsg:  "mutually exclusive",
+			errMsg:  "multiple routing targets",
 		},
 		{
 			name: "both queue and channel",
@@ -510,7 +510,7 @@ func TestMessageValidate(t *testing.T) {
 				Subject: "Test",
 			},
 			wantErr: true,
-			errMsg:  "mutually exclusive",
+			errMsg:  "multiple routing targets",
 		},
 		{
 			name: "claimed_by on non-queue message",

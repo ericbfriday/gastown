@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/errors"
 )
 
 // Priority levels for messages.
@@ -227,18 +229,29 @@ func (m *Message) Validate() error {
 	}
 
 	if count == 0 {
-		return fmt.Errorf("message must have exactly one of: to, queue, or channel")
+		return errors.User("mail.NoRoutingTarget", "message must have exactly one routing target").
+			WithContext("message_id", m.ID).
+			WithHint("Set one of: To (direct), Queue (queue routing), or Channel (broadcast)")
 	}
 	if count > 1 {
-		return fmt.Errorf("message cannot have multiple routing targets (to, queue, channel are mutually exclusive)")
+		return errors.User("mail.MultipleRoutingTargets", "message cannot have multiple routing targets").
+			WithContext("message_id", m.ID).
+			WithContext("to", m.To).
+			WithContext("queue", m.Queue).
+			WithContext("channel", m.Channel).
+			WithHint("Choose only one routing method: To, Queue, or Channel")
 	}
 
 	// ClaimedBy/ClaimedAt only valid for queue messages
 	if m.ClaimedBy != "" && m.Queue == "" {
-		return fmt.Errorf("claimed_by is only valid for queue messages")
+		return errors.User("mail.InvalidClaimedBy", "claimed_by is only valid for queue messages").
+			WithContext("message_id", m.ID).
+			WithHint("ClaimedBy field should only be set for queue messages")
 	}
 	if m.ClaimedAt != nil && m.Queue == "" {
-		return fmt.Errorf("claimed_at is only valid for queue messages")
+		return errors.User("mail.InvalidClaimedAt", "claimed_at is only valid for queue messages").
+			WithContext("message_id", m.ID).
+			WithHint("ClaimedAt field should only be set for queue messages")
 	}
 
 	return nil

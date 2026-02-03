@@ -3,8 +3,6 @@ package mail
 import (
 	"bufio"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -13,6 +11,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/errors"
 	"github.com/steveyegge/gastown/internal/runtime"
 )
 
@@ -21,8 +20,10 @@ var timeNow = time.Now
 
 // Common errors
 var (
-	ErrMessageNotFound = errors.New("message not found")
-	ErrEmptyInbox      = errors.New("inbox is empty")
+	ErrMessageNotFound = errors.Permanent("mail.MessageNotFound", nil).
+		WithHint("Check message ID with: bd list --type=message")
+	ErrEmptyInbox = errors.Permanent("mail.EmptyInbox", nil).
+		WithHint("No messages in inbox. Send a message with: gt mail send")
 )
 
 // Mailbox manages messages for an identity via beads.
@@ -188,7 +189,10 @@ func (m *Mailbox) listFromDir(beadsDir string) ([]*Message, error) {
 
 	// If ALL queries failed, return the last error
 	if !anySucceeded && lastErr != nil {
-		return nil, fmt.Errorf("all mailbox queries failed: %w", lastErr)
+		return nil, errors.Transient("mail.QueryMailbox", lastErr).
+			WithContext("identity", m.identity).
+			WithContext("beads_dir", beadsDir).
+			WithHint("Check beads database is accessible and identity is valid")
 	}
 
 	return messages, nil
@@ -213,7 +217,9 @@ func (m *Mailbox) identityVariants() []string {
 // queryMessages runs a bd list query with the given filter flag and value.
 func (m *Mailbox) queryMessages(beadsDir, filterFlag, filterValue, status string) ([]*Message, error) {
 	if err := beads.EnsureCustomTypes(beadsDir); err != nil {
-		return nil, fmt.Errorf("ensuring custom types: %w", err)
+		return nil, errors.Transient("mail.EnsureCustomTypes", err).
+			WithContext("beads_dir", beadsDir).
+			WithHint("Check beads installation and permissions")
 	}
 
 	args := []string{"list",
@@ -225,7 +231,10 @@ func (m *Mailbox) queryMessages(beadsDir, filterFlag, filterValue, status string
 
 	stdout, err := runBdCommand(args, m.workDir, beadsDir)
 	if err != nil {
-		return nil, err
+		return nil, errors.Transient("mail.ListMessages", err).
+			WithContext("filter", filterValue).
+			WithContext("status", status).
+			WithHint("Check beads database is accessible: bd list --type=message")
 	}
 
 	// Parse JSON output
@@ -320,9 +329,12 @@ func (m *Mailbox) getFromDir(id, beadsDir string) (*Message, error) {
 	stdout, err := runBdCommand(args, m.workDir, beadsDir)
 	if err != nil {
 		if bdErr, ok := err.(*bdError); ok && bdErr.ContainsError("not found") {
-			return nil, ErrMessageNotFound
+			return nil, ErrMessageNotFound.WithContext("message_id", id)
 		}
-		return nil, err
+		return nil, errors.Transient("mail.ShowMessage", err).
+			WithContext("message_id", id).
+			WithContext("beads_dir", beadsDir).
+			WithHint("Check message exists with: bd list --type=message")
 	}
 
 	// bd show --json returns an array
@@ -375,9 +387,12 @@ func (m *Mailbox) closeInDir(id, beadsDir string) error {
 	_, err := runBdCommand(args, m.workDir, beadsDir)
 	if err != nil {
 		if bdErr, ok := err.(*bdError); ok && bdErr.ContainsError("not found") {
-			return ErrMessageNotFound
+			return ErrMessageNotFound.WithContext("message_id", id)
 		}
-		return err
+		return errors.Transient("mail.CloseMessage", err).
+			WithContext("message_id", id).
+			WithContext("beads_dir", beadsDir).
+			WithHint("Check message exists and is open: bd show " + id)
 	}
 
 	return nil
@@ -422,9 +437,11 @@ func (m *Mailbox) markReadOnlyBeads(id string) error {
 	_, err := runBdCommand(args, m.workDir, m.beadsDir)
 	if err != nil {
 		if bdErr, ok := err.(*bdError); ok && bdErr.ContainsError("not found") {
-			return ErrMessageNotFound
+			return ErrMessageNotFound.WithContext("message_id", id)
 		}
-		return err
+		return errors.Transient("mail.MarkReadOnly", err).
+			WithContext("message_id", id).
+			WithHint("Check message exists: bd show " + id)
 	}
 
 	return nil
@@ -447,13 +464,15 @@ func (m *Mailbox) markUnreadOnlyBeads(id string) error {
 	_, err := runBdCommand(args, m.workDir, m.beadsDir)
 	if err != nil {
 		if bdErr, ok := err.(*bdError); ok && bdErr.ContainsError("not found") {
-			return ErrMessageNotFound
+			return ErrMessageNotFound.WithContext("message_id", id)
 		}
 		// Ignore error if label doesn't exist
 		if bdErr, ok := err.(*bdError); ok && bdErr.ContainsError("does not have label") {
 			return nil
 		}
-		return err
+		return errors.Transient("mail.MarkUnreadOnly", err).
+			WithContext("message_id", id).
+			WithHint("Check message exists: bd show " + id)
 	}
 
 	return nil
@@ -473,9 +492,11 @@ func (m *Mailbox) markUnreadBeads(id string) error {
 	_, err := runBdCommand(args, m.workDir, m.beadsDir)
 	if err != nil {
 		if bdErr, ok := err.(*bdError); ok && bdErr.ContainsError("not found") {
-			return ErrMessageNotFound
+			return ErrMessageNotFound.WithContext("message_id", id)
 		}
-		return err
+		return errors.Transient("mail.ReopenMessage", err).
+			WithContext("message_id", id).
+			WithHint("Check message exists and is closed: bd show " + id)
 	}
 
 	return nil
@@ -709,14 +730,18 @@ func (m *Mailbox) Search(opts SearchOptions) ([]*Message, error) {
 	// and provides intuitive literal string matching for users
 	re, err := regexp.Compile("(?i)" + regexp.QuoteMeta(opts.Query))
 	if err != nil {
-		return nil, fmt.Errorf("invalid search pattern: %w", err)
+		return nil, errors.User("mail.InvalidSearchPattern", "invalid search pattern").
+			WithContext("pattern", opts.Query).
+			WithHint("Search uses literal string matching (case-insensitive)")
 	}
 
 	var fromRe *regexp.Regexp
 	if opts.FromFilter != "" {
 		fromRe, err = regexp.Compile("(?i)" + regexp.QuoteMeta(opts.FromFilter))
 		if err != nil {
-			return nil, fmt.Errorf("invalid from pattern: %w", err)
+			return nil, errors.User("mail.InvalidFromFilter", "invalid from filter").
+				WithContext("filter", opts.FromFilter).
+				WithHint("From filter uses literal string matching (case-insensitive)")
 		}
 	}
 
@@ -788,7 +813,8 @@ func (m *Mailbox) Count() (total, unread int, err error) {
 // For beads mode, use Router.Send() instead.
 func (m *Mailbox) Append(msg *Message) error {
 	if !m.legacy {
-		return errors.New("use Router.Send() to send messages via beads")
+		return errors.User("mail.UseRouter", "use Router.Send() to send messages via beads").
+			WithHint("For beads-backed mailboxes, use: router.Send(msg) instead of mailbox.Append(msg)")
 	}
 	return m.appendLegacy(msg)
 }
@@ -797,23 +823,34 @@ func (m *Mailbox) appendLegacy(msg *Message) error {
 	// Ensure directory exists
 	dir := filepath.Dir(m.path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
+		return errors.System("mail.CreateMailboxDir", err).
+			WithContext("mailbox_path", m.path).
+			WithHint("Check directory permissions and disk space")
 	}
 
 	// Open for append
 	file, err := os.OpenFile(m.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
-		return err
+		return errors.Transient("mail.OpenMailbox", err).
+			WithContext("mailbox_path", m.path).
+			WithHint("Check file permissions: ls -la " + filepath.Dir(m.path))
 	}
 	defer func() { _ = file.Close() }() // non-fatal: OS will close on exit
 
 	data, err := json.Marshal(msg)
 	if err != nil {
-		return err
+		return errors.System("mail.MarshalMessage", err).
+			WithContext("message_id", msg.ID).
+			WithHint("Message contains invalid data - check message fields")
 	}
 
 	_, err = file.WriteString(string(data) + "\n")
-	return err
+	if err != nil {
+		return errors.Transient("mail.WriteMessage", err).
+			WithContext("mailbox_path", m.path).
+			WithHint("Check disk space: df -h")
+	}
+	return nil
 }
 
 // rewriteLegacy rewrites the mailbox with the given messages.
