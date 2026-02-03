@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/filelock"
 	"github.com/steveyegge/gastown/internal/hooks"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -49,6 +50,20 @@ func DefaultMailOrchestratorConfig() *MailOrchestratorConfig {
 // MailOrchestrator orchestrates mail delivery for async agent communication.
 // It monitors mail queues, delivers messages based on priority and routing rules,
 // and handles retries and dead letter queues.
+//
+// Concurrency Safety:
+// - In-memory queues are protected by mutex locks (inboundMu, outboundMu, deadLetterMu)
+// - Queue file operations are protected by filelock to prevent corruption
+// - loadQueue() uses filelock.WithReadLock() for safe concurrent reads
+// - saveQueue() uses filelock.WithWriteLock() for atomic writes
+// - Atomic write pattern: write to .tmp file, then rename to prevent partial reads
+//
+// Queue Files:
+// - inbound.json  - messages pending delivery
+// - outbound.json - messages pending retry
+// - dead-letter.json - permanently failed messages
+//
+// Lock files are stored in daemon/mail-queues/.gastown/locks/
 type MailOrchestrator struct {
 	townRoot string
 	config   *MailOrchestratorConfig
@@ -60,11 +75,11 @@ type MailOrchestrator struct {
 	wg       sync.WaitGroup
 
 	// Queue tracking
-	inboundMu      sync.Mutex
-	inboundQueue   []*QueuedMessage
-	outboundMu     sync.Mutex
-	outboundQueue  []*QueuedMessage
-	deadLetterMu   sync.Mutex
+	inboundMu       sync.Mutex
+	inboundQueue    []*QueuedMessage
+	outboundMu      sync.Mutex
+	outboundQueue   []*QueuedMessage
+	deadLetterMu    sync.Mutex
 	deadLetterQueue []*QueuedMessage
 }
 
@@ -572,17 +587,20 @@ func (mo *MailOrchestrator) loadQueues() error {
 	return nil
 }
 
-// loadQueue loads a queue from JSON file.
+// loadQueue loads a queue from JSON file with file locking.
+// Uses filelock.WithReadLock to prevent concurrent read/write corruption.
 func (mo *MailOrchestrator) loadQueue(path string, queue *[]*QueuedMessage) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
+	return filelock.WithReadLock(path, func() error {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
 		}
-		return err
-	}
 
-	return json.Unmarshal(data, queue)
+		return json.Unmarshal(data, queue)
+	})
 }
 
 // saveQueues saves persistent queues to disk.
@@ -616,14 +634,24 @@ func (mo *MailOrchestrator) saveQueues() error {
 	return nil
 }
 
-// saveQueue saves a queue to JSON file.
+// saveQueue saves a queue to JSON file with file locking.
+// Uses filelock.WithWriteLock to ensure atomic writes and prevent corruption.
+// Implements atomic write pattern: write to temp file, then rename.
 func (mo *MailOrchestrator) saveQueue(path string, queue []*QueuedMessage) error {
-	data, err := json.MarshalIndent(queue, "", "  ")
-	if err != nil {
-		return err
-	}
+	return filelock.WithWriteLock(path, func() error {
+		data, err := json.MarshalIndent(queue, "", "  ")
+		if err != nil {
+			return err
+		}
 
-	return os.WriteFile(path, data, 0644)
+		// Atomic write: write to temp file, then rename
+		tmpPath := path + ".tmp"
+		if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+			return err
+		}
+
+		return os.Rename(tmpPath, path)
+	})
 }
 
 // GetStats returns orchestrator statistics.
