@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/polecat"
-	"github.com/steveyegge/gastown/internal/rig"
 )
 
 func TestExpandSingleSpec(t *testing.T) {

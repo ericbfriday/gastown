@@ -124,7 +124,7 @@ func runWorkspaceClean(cmd *cobra.Command, args []string) error {
 
 	// Human-readable output
 	if cleanDryRun {
-		fmt.Println("\n🔍 DRY RUN - No changes will be made\n")
+		fmt.Println("\n🔍 DRY RUN - No changes will be made")
 	}
 
 	totalFiles := 0
