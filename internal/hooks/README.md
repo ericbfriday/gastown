@@ -90,9 +90,12 @@ Internal Go functions:
 ```
 
 Available builtin hooks:
-- `pre-shutdown-checks`: Composite check (git clean, uncommitted)
+- `pre-shutdown-checks`: Composite check (git clean, commits pushed, beads synced, assigned issues)
 - `verify-git-clean`: Ensure working directory is clean
-- `check-uncommitted`: Check for uncommitted changes
+- `check-uncommitted`: Check for uncommitted changes (alias for verify-git-clean)
+- `check-commits-pushed`: Verify all commits are pushed to remote
+- `check-beads-synced`: Check if beads database is synced (non-blocking warning)
+- `check-assigned-issues`: Check for hooked issues that need handling
 
 ## CLI Commands
 
