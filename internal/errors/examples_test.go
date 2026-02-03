@@ -105,7 +105,7 @@ func Example_retryFunc() {
 // Example_domainError demonstrates using domain-specific errors.
 func Example_domainError() {
 	gitErr := errors.NewGitError("push", "/path/to/repo", "main", fmt.Errorf("rejected"))
-	gitErr.(*errors.GitError).Err = gitErr.(*errors.GitError).Err // Type assertion for example
+	// gitErr is already *errors.GitError, no type assertion needed
 
 	fmt.Println(gitErr.Error())
 	// Output will vary based on error wrapping
