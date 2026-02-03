@@ -138,6 +138,28 @@ gt hooks lifecycle test --all
 gt hooks lifecycle test --json
 ```
 
+## Testing Pre-Shutdown Checks
+
+You can test pre-shutdown checks without actually stopping a session:
+
+```bash
+# Test all pre-shutdown checks
+gt hooks lifecycle fire pre-shutdown --verbose
+
+# Expected output on success:
+# ✓ pre-shutdown-checks: All pre-shutdown checks passed
+
+# Expected output on failure:
+# ✗ pre-shutdown-checks: Pre-shutdown checks failed:
+#   - git-clean: Working directory has uncommitted changes
+#   - commits-pushed: Branch main has 2 unpushed commit(s)
+```
+
+This is useful for:
+- Verifying your hooks configuration
+- Understanding why a shutdown was blocked
+- Debugging pre-shutdown check issues
+
 ## Programmatic Usage
 
 ```go

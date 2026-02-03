@@ -1,50 +1,15 @@
 {
   "hooks": {
-    "pre-session-start": [
+    "pre-shutdown": [
       {
         "type": "builtin",
-        "name": "verify-git-clean",
-        "comment": "Ensure working directory is clean before starting session"
-      },
-      {
-        "type": "command",
-        "cmd": "./scripts/pre-session-check.sh",
-        "comment": "Custom pre-session validation"
+        "name": "pre-shutdown-checks"
       }
     ],
     "post-session-start": [
       {
         "type": "command",
-        "cmd": "./scripts/notify-session-started.sh",
-        "comment": "Notify when session starts"
-      }
-    ],
-    "pre-shutdown": [
-      {
-        "type": "builtin",
-        "name": "pre-shutdown-checks",
-        "comment": "Run standard pre-shutdown checks (git clean, uncommitted)"
-      }
-    ],
-    "post-shutdown": [
-      {
-        "type": "command",
-        "cmd": "./scripts/cleanup-session.sh",
-        "comment": "Clean up after session shutdown"
-      }
-    ],
-    "mail-received": [
-      {
-        "type": "command",
-        "cmd": "./scripts/process-mail.sh",
-        "comment": "Process incoming mail"
-      }
-    ],
-    "work-assigned": [
-      {
-        "type": "command",
-        "cmd": "./scripts/log-work-assignment.sh",
-        "comment": "Log work assignments for tracking"
+        "cmd": "echo 'Session started successfully'"
       }
     ]
   }

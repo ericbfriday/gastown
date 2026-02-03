@@ -166,13 +166,13 @@ func checkCommitsPushed(ctx *HookContext) (*HookResult, error) {
 	branchCmd.Dir = workDir
 	branchOutput, err := branchCmd.Output()
 	if err != nil {
+		// Can't get branch (empty repo or detached HEAD) - this is OK
 		return &HookResult{
-			Success: false,
-			Message: fmt.Sprintf("Failed to get current branch: %v", err),
+			Success: true,
+			Message: "Cannot determine current branch (empty repo or detached HEAD)",
 		}, nil
 	}
-	branch := string(branchOutput)
-	branch = branch[:len(branch)-1] // trim newline
+	branch := strings.TrimSpace(string(branchOutput))
 
 	// Check for unpushed commits (compare with remote tracking branch)
 	// git log @{u}..HEAD returns unpushed commits

@@ -72,8 +72,14 @@ var sessionStopCmd = &cobra.Command{
 	Short: "Stop a polecat session",
 	Long: `Stop a running polecat session.
 
-Attempts graceful shutdown first (Ctrl-C), then kills the tmux session.
-Use --force to skip graceful shutdown.`,
+Pre-shutdown checks are run before stopping to prevent data loss:
+  - Working directory must be clean (no uncommitted changes)
+  - All commits must be pushed to remote
+  - Beads database must be synced
+  - No hooked issues pending for this polecat
+
+Use --force to skip pre-shutdown checks and force immediate shutdown.
+Attempts graceful shutdown first (Ctrl-C), then kills the tmux session.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runSessionStop,
 }
