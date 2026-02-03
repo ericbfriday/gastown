@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -530,7 +531,8 @@ func processExists(pid int) bool {
 	if err != nil {
 		return false
 	}
-	err = process.Signal(os.Signal(nil))
+	// Signal 0 doesn't actually send a signal, just checks if process exists
+	err = process.Signal(syscall.Signal(0))
 	return err == nil
 }
 

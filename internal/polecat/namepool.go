@@ -279,8 +279,15 @@ func (p *NamePool) Release(name string) {
 
 // isThemedName checks if a name is in the theme pool.
 func (p *NamePool) isThemedName(name string) bool {
-	names := p.getNames()
-	for _, n := range names {
+	// Check against the raw theme names (not filtered by getNames which only returns available)
+	var themeNames []string
+	if names, ok := BuiltinThemes[p.Theme]; ok {
+		themeNames = names
+	} else {
+		themeNames = BuiltinThemes[DefaultTheme]
+	}
+
+	for _, n := range themeNames {
 		if n == name {
 			return true
 		}
@@ -457,12 +464,18 @@ func (p *NamePool) HasName(name string) bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	names := p.getNames()
-	for _, n := range names {
+	// Check if it's a custom name
+	for _, n := range p.CustomNames {
 		if n == name {
 			return true
 		}
 	}
+
+	// Check if it's a themed name
+	if p.isThemedName(name) {
+		return true
+	}
+
 	return false
 }
 
