@@ -58,3 +58,10 @@ CLAUDE.md
 logs/
 settings/
 .events.jsonl
+
+# Rig working directories (git repos within git repos)
+**/crew/
+**/mayor/rig/
+**/refinery/rig/
+**/witness/rig/
+**/polecats/
