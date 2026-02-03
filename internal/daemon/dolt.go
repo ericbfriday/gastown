@@ -3,7 +3,6 @@ package daemon
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/errors"
 )
 
 // DoltServerConfig holds configuration for the Dolt SQL server.
@@ -240,13 +241,16 @@ func (m *DoltServerManager) Start() error {
 func (m *DoltServerManager) startLocked() error {
 	// Ensure data directory exists
 	if err := os.MkdirAll(m.config.DataDir, 0755); err != nil {
-		return fmt.Errorf("creating data directory: %w", err)
+		return errors.System("daemon.dolt", err).
+			WithHint("Check directory permissions and disk space for Dolt data directory").
+			WithContext("data_dir", m.config.DataDir)
 	}
 
 	// Check if dolt is installed
 	doltPath, err := exec.LookPath("dolt")
 	if err != nil {
-		return fmt.Errorf("dolt not found in PATH: %w", err)
+		return errors.System("daemon.dolt", err).
+			WithHint("Install Dolt from https://github.com/dolthub/dolt or ensure it's in PATH")
 	}
 
 	// Build command arguments
@@ -260,8 +264,11 @@ func (m *DoltServerManager) startLocked() error {
 	// Open log file
 	logFile, err := os.OpenFile(m.config.LogFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
-		return fmt.Errorf("opening log file: %w", err)
+		return errors.System("daemon.dolt", err).
+			WithHint("Check log directory permissions and disk space").
+			WithContext("log_file", m.config.LogFile)
 	}
+	defer logFile.Close()
 
 	// Start dolt sql-server as background process
 	cmd := exec.Command(doltPath, args...)
@@ -273,8 +280,10 @@ func (m *DoltServerManager) startLocked() error {
 	setSysProcAttr(cmd)
 
 	if err := cmd.Start(); err != nil {
-		logFile.Close()
-		return fmt.Errorf("starting dolt sql-server: %w", err)
+		return errors.Transient("daemon.dolt", err).
+			WithHint("Failed to start Dolt server. Check logs at "+m.config.LogFile).
+			WithContext("port", m.config.Port).
+			WithContext("data_dir", m.config.DataDir)
 	}
 
 	// Don't wait for it - it's a long-running server
@@ -367,20 +376,18 @@ func (m *DoltServerManager) checkHealth() error {
 
 // checkHealthLocked checks health. Must be called with m.mu held.
 func (m *DoltServerManager) checkHealthLocked() error {
-	// Try to connect via MySQL protocol
-	// Use dolt sql -q to test connectivity
-	cmd := exec.Command("dolt", "sql",
-		"--host", m.config.Host,
-		"--port", strconv.Itoa(m.config.Port),
-		"--no-auto-commit",
-		"-q", "SELECT 1",
-	)
-
+	// Run health check command
+	cmd := exec.Command("dolt", "sql", "-q", "SELECT 1")
+	cmd.Dir = m.config.DataDir
+	cmd.Env = os.Environ()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("health check failed: %w (%s)", err, strings.TrimSpace(stderr.String()))
+		return errors.Transient("daemon.dolt-health", err).
+			WithHint("Dolt server health check failed. Check if server is running and responsive").
+			WithContext("port", m.config.Port).
+			WithContext("stderr", strings.TrimSpace(stderr.String()))
 	}
 
 	return nil

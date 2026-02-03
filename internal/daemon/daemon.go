@@ -21,6 +21,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/deacon"
+	"github.com/steveyegge/gastown/internal/errors"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/feed"
 	"github.com/steveyegge/gastown/internal/polecat"
@@ -78,13 +79,17 @@ func New(config *Config) (*Daemon, error) {
 	// Ensure daemon directory exists
 	daemonDir := filepath.Dir(config.LogFile)
 	if err := os.MkdirAll(daemonDir, 0755); err != nil {
-		return nil, fmt.Errorf("creating daemon directory: %w", err)
+		return nil, errors.System("daemon.init", err).
+			WithHint("Ensure the town directory has proper permissions and sufficient disk space").
+			WithContext("daemon_dir", daemonDir)
 	}
 
 	// Open log file
 	logFile, err := os.OpenFile(config.LogFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
-		return nil, fmt.Errorf("opening log file: %w", err)
+		return nil, errors.System("daemon.init", err).
+			WithHint("Check file permissions in daemon directory and verify disk space").
+			WithContext("log_file", config.LogFile)
 	}
 
 	logger := log.New(logFile, "", log.LstdFlags)
@@ -130,16 +135,23 @@ func (d *Daemon) Run() error {
 	// Try to acquire exclusive lock (non-blocking)
 	locked, err := fileLock.TryLock()
 	if err != nil {
-		return fmt.Errorf("acquiring lock: %w", err)
+		return errors.System("daemon.lock", err).
+			WithHint("Check daemon directory permissions and try 'gt daemon stop' to clean up stale locks").
+			WithContext("lock_file", lockFile)
 	}
 	if !locked {
-		return fmt.Errorf("daemon already running (lock held by another process)")
+		return errors.Permanent("daemon.start", fmt.Errorf("daemon already running (lock held by another process)")).
+			WithHint("Another daemon is running. Use 'gt daemon status' to check or 'gt daemon stop' to terminate it").
+			WithContext("lock_file", lockFile)
 	}
 	defer func() { _ = fileLock.Unlock() }()
 
 	// Write PID file
 	if err := os.WriteFile(d.config.PidFile, []byte(strconv.Itoa(os.Getpid())), 0644); err != nil {
-		return fmt.Errorf("writing PID file: %w", err)
+		return errors.System("daemon.start", err).
+			WithHint("Check daemon directory permissions and disk space").
+			WithContext("pid_file", d.config.PidFile).
+			WithContext("pid", os.Getpid())
 	}
 	defer func() { _ = os.Remove(d.config.PidFile) }() // best-effort cleanup
 
@@ -797,14 +809,19 @@ func IsRunning(townRoot string) (bool, int, error) {
 			return false, 0, nil
 		}
 		// Return error for other failures (permissions, I/O)
-		return false, 0, fmt.Errorf("reading PID file: %w", err)
+		return false, 0, errors.System("daemon.status", err).
+			WithHint("Check daemon directory permissions").
+			WithContext("pid_file", pidFile)
 	}
 
 	pidStr := strings.TrimSpace(string(data))
 	pid, err := strconv.Atoi(pidStr)
 	if err != nil {
 		// Corrupted PID file - return error, not silent false
-		return false, 0, fmt.Errorf("invalid PID in file %q: %w", pidStr, err)
+		return false, 0, errors.Permanent("daemon.status", err).
+			WithHint("PID file is corrupted. Run 'gt daemon stop' to clean up and restart the daemon").
+			WithContext("pid_file", pidFile).
+			WithContext("pid_string", pidStr)
 	}
 
 	// Check if process is alive
@@ -818,7 +835,10 @@ func IsRunning(townRoot string) (bool, int, error) {
 		// Process not running, clean up stale PID file
 		if err := os.Remove(pidFile); err == nil {
 			// Successfully cleaned up stale file
-			return false, 0, fmt.Errorf("removed stale PID file (process %d not found)", pid)
+			return false, 0, errors.Transient("daemon.status", fmt.Errorf("removed stale PID file (process %d not found)", pid)).
+				WithHint("Daemon was not running. Try 'gt daemon start' to restart").
+				WithContext("pid", pid).
+				WithContext("pid_file", pidFile)
 		}
 		return false, 0, nil
 	}
@@ -827,7 +847,10 @@ func IsRunning(townRoot string) (bool, int, error) {
 	if !isGasTownDaemon(pid) {
 		// PID reused by different process
 		if err := os.Remove(pidFile); err == nil {
-			return false, 0, fmt.Errorf("removed stale PID file (PID %d is not gt daemon)", pid)
+			return false, 0, errors.Transient("daemon.status", fmt.Errorf("removed stale PID file (PID %d is not gt daemon)", pid)).
+				WithHint("PID was reused by another process. Try 'gt daemon start' to restart").
+				WithContext("pid", pid).
+				WithContext("pid_file", pidFile)
 		}
 		return false, 0, nil
 	}
@@ -861,17 +884,22 @@ func StopDaemon(townRoot string) error {
 		return err
 	}
 	if !running {
-		return fmt.Errorf("daemon is not running")
+		return errors.User("daemon.stop", "daemon is not running").
+			WithHint("Check daemon status with 'gt daemon status'")
 	}
 
 	process, err := os.FindProcess(pid)
 	if err != nil {
-		return fmt.Errorf("finding process: %w", err)
+		return errors.System("daemon.stop", err).
+			WithHint("Unable to find daemon process. It may have crashed").
+			WithContext("pid", pid)
 	}
 
 	// Send SIGTERM for graceful shutdown
 	if err := process.Signal(syscall.SIGTERM); err != nil {
-		return fmt.Errorf("sending SIGTERM: %w", err)
+		return errors.Transient("daemon.stop", err).
+			WithHint("Try 'gt daemon stop' again or use 'kill -9' to force terminate").
+			WithContext("pid", pid)
 	}
 
 	// Wait a bit for graceful shutdown
@@ -901,7 +929,8 @@ func FindOrphanedDaemons() ([]int, error) {
 		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("pgrep failed: %w", err)
+		return nil, errors.Transient("daemon.orphan-check", err).
+			WithHint("The 'pgrep' command failed. Ensure it is installed and available in PATH")
 	}
 
 	// Parse PIDs
@@ -1115,7 +1144,11 @@ func (d *Daemon) emitMassDeathEvent() {
 func (d *Daemon) restartPolecatSession(rigName, polecatName, sessionName string) error {
 	// Check rig operational state before auto-restarting
 	if operational, reason := d.isRigOperational(rigName); !operational {
-		return fmt.Errorf("cannot restart polecat: %s", reason)
+		return errors.Permanent("daemon.polecat-restart", fmt.Errorf("cannot restart polecat: %s", reason)).
+			WithHint("Check rig status with 'gt rig status' or enable auto_restart in wisp config").
+			WithContext("rig", rigName).
+			WithContext("polecat", polecatName).
+			WithContext("reason", reason)
 	}
 
 	// Calculate rig path for agent config resolution
@@ -1132,7 +1165,11 @@ func (d *Daemon) restartPolecatSession(rigName, polecatName, sessionName string)
 
 	// Verify the worktree exists
 	if _, err := os.Stat(workDir); os.IsNotExist(err) {
-		return fmt.Errorf("polecat worktree does not exist: %s", workDir)
+		return errors.Permanent("daemon.polecat-restart", fmt.Errorf("polecat worktree does not exist: %s", workDir)).
+			WithHint("The polecat worktree was deleted. Remove the polecat with 'gt polecat nuke'").
+			WithContext("rig", rigName).
+			WithContext("polecat", polecatName).
+			WithContext("work_dir", workDir)
 	}
 
 	// Pre-sync workspace (ensure beads are current)
@@ -1141,7 +1178,10 @@ func (d *Daemon) restartPolecatSession(rigName, polecatName, sessionName string)
 	// Create new tmux session
 	// Use EnsureSessionFresh to handle zombie sessions that exist but have dead Claude
 	if err := d.tmux.EnsureSessionFresh(sessionName, workDir); err != nil {
-		return fmt.Errorf("creating session: %w", err)
+		return errors.Transient("daemon.polecat-restart", err).
+			WithHint("Failed to create tmux session. Check tmux is installed and functioning").
+			WithContext("session", sessionName).
+			WithContext("work_dir", workDir)
 	}
 
 	// Set environment variables using centralized AgentEnv
@@ -1170,7 +1210,10 @@ func (d *Daemon) restartPolecatSession(rigName, polecatName, sessionName string)
 	// Pass rigPath so rig agent settings are honored (not town-level defaults)
 	startCmd := config.BuildStartupCommand(envVars, rigPath, "")
 	if err := d.tmux.SendKeys(sessionName, startCmd); err != nil {
-		return fmt.Errorf("sending startup command: %w", err)
+		return errors.Transient("daemon.polecat-restart", err).
+			WithHint("Failed to send startup command to tmux. Check session exists and is accessible").
+			WithContext("session", sessionName).
+			WithContext("command", startCmd)
 	}
 
 	// Wait for Claude to start, then accept bypass permissions warning if it appears.

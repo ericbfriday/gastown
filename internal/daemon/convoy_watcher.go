@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/errors"
 )
 
 // ConvoyWatcher monitors bd activity for issue closes and triggers convoy completion checks.
@@ -90,30 +92,29 @@ func (w *ConvoyWatcher) watchActivity() error {
 	cmd.Dir = w.townRoot
 	cmd.Env = os.Environ() // Inherit PATH to find bd executable
 
+	// Create stdout pipe for streaming output
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("creating stdout pipe: %w", err)
+		return errors.Transient("daemon.convoy-watcher", err).
+			WithHint("Failed to create stdout pipe. Check system resources and permissions")
 	}
 
+	// Start the process
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("starting bd activity: %w", err)
+		return errors.Transient("daemon.convoy-watcher", err).
+			WithHint("Failed to start 'bd activity' command. Check bd is installed and accessible").
+			WithContext("command", "bd activity --follow")
 	}
 
 	scanner := bufio.NewScanner(stdout)
 	for scanner.Scan() {
-		select {
-		case <-w.ctx.Done():
-			_ = cmd.Process.Kill()
-			return nil
-		default:
-		}
-
 		line := scanner.Text()
 		w.processLine(line)
 	}
 
 	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("reading bd activity: %w", err)
+		return errors.Transient("daemon.convoy-watcher", err).
+			WithHint("Error reading from 'bd activity' stream. The command may have failed")
 	}
 
 	return cmd.Wait()

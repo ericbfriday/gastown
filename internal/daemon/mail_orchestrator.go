@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/errors"
 	"github.com/steveyegge/gastown/internal/filelock"
 	"github.com/steveyegge/gastown/internal/hooks"
 	"github.com/steveyegge/gastown/internal/mail"
@@ -385,7 +386,10 @@ func (mo *MailOrchestrator) deliverInterrupt(msg *mail.Message) error {
 	// Resolve address to session ID
 	sessionIDs := addressToSessionIDs(msg.To)
 	if len(sessionIDs) == 0 {
-		return fmt.Errorf("cannot resolve session for address: %s", msg.To)
+		return errors.User("daemon.mail-delivery", "cannot resolve session for address: "+msg.To).
+			WithHint("Check recipient address format. Use 'gt mail list' to see available agents").
+			WithContext("recipient", msg.To).
+			WithContext("message_id", msg.ID)
 	}
 
 	// Try each possible session ID
@@ -393,7 +397,10 @@ func (mo *MailOrchestrator) deliverInterrupt(msg *mail.Message) error {
 	for _, sessionID := range sessionIDs {
 		hasSession, err := mo.tmux.HasSession(sessionID)
 		if err != nil || !hasSession {
-			lastErr = fmt.Errorf("session %s not found", sessionID)
+			lastErr = errors.Transient("daemon.mail-delivery", err).
+				WithHint("Failed to check session status. Verify tmux is running").
+				WithContext("session", sessionID).
+				WithContext("recipient", msg.To)
 			continue
 		}
 
@@ -406,13 +413,16 @@ func (mo *MailOrchestrator) deliverInterrupt(msg *mail.Message) error {
 			continue
 		}
 
+		// Mark as delivered
 		return nil
 	}
 
 	if lastErr != nil {
 		return lastErr
 	}
-	return fmt.Errorf("no active session found for: %s", msg.To)
+	return errors.User("daemon.mail-delivery", "no active session found for: "+msg.To).
+		WithHint("The recipient session is not running. Start the agent or wait for daemon to restart it").
+		WithContext("recipient", msg.To)
 }
 
 // notifyRecipient sends notification for queued message.

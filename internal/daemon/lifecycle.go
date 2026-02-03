@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/errors"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -158,7 +159,9 @@ func (d *Daemon) executeLifecycleAction(request *LifecycleRequest) error {
 	// Determine session name from sender identity
 	sessionName := d.identityToSession(request.From)
 	if sessionName == "" {
-		return fmt.Errorf("unknown agent identity: %s", request.From)
+		return errors.User("daemon.lifecycle", "unknown agent identity: "+request.From).
+			WithHint("Check agent identity format. Expected formats: 'mayor', 'deacon', '<rig>-witness', '<rig>-refinery'").
+			WithContext("identity", request.From)
 	}
 
 	d.logger.Printf("Executing %s for session %s", request.Action, sessionName)
@@ -174,7 +177,10 @@ func (d *Daemon) executeLifecycleAction(request *LifecycleRequest) error {
 	// Check if session exists (tmux detection still needed for lifecycle actions)
 	running, err := d.tmux.HasSession(sessionName)
 	if err != nil {
-		return fmt.Errorf("checking session: %w", err)
+		return errors.Transient("daemon.lifecycle", err).
+			WithHint("Failed to check session status. Verify tmux is running and accessible").
+			WithContext("session", sessionName).
+			WithContext("action", string(request.Action))
 	}
 
 	switch request.Action {
@@ -183,7 +189,10 @@ func (d *Daemon) executeLifecycleAction(request *LifecycleRequest) error {
 			// Use KillSessionWithProcesses to ensure all descendant processes are killed.
 			// This prevents orphan bash processes from Claude's Bash tool surviving session termination.
 			if err := d.tmux.KillSessionWithProcesses(sessionName); err != nil {
-				return fmt.Errorf("killing session: %w", err)
+				return errors.Transient("daemon.lifecycle", err).
+					WithHint("Failed to kill session. Try manually with 'tmux kill-session -t " + sessionName + "'").
+					WithContext("session", sessionName).
+					WithContext("action", "shutdown")
 			}
 			d.logger.Printf("Killed session %s", sessionName)
 		}
@@ -193,7 +202,10 @@ func (d *Daemon) executeLifecycleAction(request *LifecycleRequest) error {
 		if running {
 			// Kill the session first - use KillSessionWithProcesses to prevent orphan processes.
 			if err := d.tmux.KillSessionWithProcesses(sessionName); err != nil {
-				return fmt.Errorf("killing session: %w", err)
+				return errors.Transient("daemon.lifecycle", err).
+					WithHint("Failed to kill session before restart. Try manually with 'tmux kill-session -t " + sessionName + "'").
+					WithContext("session", sessionName).
+					WithContext("action", "restart")
 			}
 			d.logger.Printf("Killed session %s for restart", sessionName)
 
@@ -203,13 +215,19 @@ func (d *Daemon) executeLifecycleAction(request *LifecycleRequest) error {
 
 		// Restart the session
 		if err := d.restartSession(sessionName, request.From); err != nil {
-			return fmt.Errorf("restarting session: %w", err)
+			return errors.Transient("daemon.lifecycle", err).
+				WithHint("Failed to restart session. Check logs for details or manually restart with 'gt start'").
+				WithContext("session", sessionName).
+				WithContext("identity", request.From)
 		}
 		d.logger.Printf("Restarted session %s", sessionName)
 		return nil
 
 	default:
-		return fmt.Errorf("unknown action: %s", request.Action)
+		return errors.Permanent("daemon.lifecycle", fmt.Errorf("unknown action: %s", request.Action)).
+			WithHint("Valid actions are: cycle, restart, shutdown").
+			WithContext("action", string(request.Action)).
+			WithContext("identity", request.From)
 	}
 }
 
@@ -268,7 +286,9 @@ func parseIdentity(identity string) (*ParsedIdentity, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("unknown identity format: %s", identity)
+	return nil, errors.User("daemon.identity", "unknown identity format: "+identity).
+		WithHint("Identity must match a supported format: 'mayor', 'deacon', '<rig>-witness', '<rig>-refinery', '<rig>-crew-<name>', '<rig>-polecat-<name>'").
+		WithContext("identity", identity)
 }
 
 // getRoleConfigForIdentity loads role configuration from the config-based role system.
@@ -342,7 +362,9 @@ func (d *Daemon) restartSession(sessionName, identity string) error {
 	// Get role config for this identity
 	config, parsed, err := d.getRoleConfigForIdentity(identity)
 	if err != nil {
-		return fmt.Errorf("parsing identity: %w", err)
+		return errors.User("daemon.restart", err.Error()).
+			WithHint("Check agent identity format and configuration").
+			WithContext("identity", identity)
 	}
 
 	// Check rig operational state for rig-level agents (witness, refinery, crew, polecat)
@@ -350,14 +372,21 @@ func (d *Daemon) restartSession(sessionName, identity string) error {
 	if parsed.RigName != "" {
 		if operational, reason := d.isRigOperational(parsed.RigName); !operational {
 			d.logger.Printf("Skipping session restart for %s: %s", identity, reason)
-			return fmt.Errorf("cannot restart session: %s", reason)
+			return errors.Permanent("daemon.restart", fmt.Errorf("cannot restart session: %s", reason)).
+				WithHint("Check rig status with 'gt rig status' or enable auto_restart in wisp config").
+				WithContext("identity", identity).
+				WithContext("rig", parsed.RigName).
+				WithContext("reason", reason)
 		}
 	}
 
 	// Determine working directory
 	workDir := d.getWorkDir(config, parsed)
 	if workDir == "" {
-		return fmt.Errorf("cannot determine working directory for %s", identity)
+		return errors.Permanent("daemon.restart", fmt.Errorf("cannot determine working directory for %s", identity)).
+			WithHint("The agent's working directory configuration is missing or invalid").
+			WithContext("identity", identity).
+			WithContext("role_type", parsed.RoleType)
 	}
 
 	// Determine if pre-sync is needed
@@ -372,7 +401,10 @@ func (d *Daemon) restartSession(sessionName, identity string) error {
 	// Create session
 	// Use EnsureSessionFresh to handle zombie sessions that exist but have dead Claude
 	if err := d.tmux.EnsureSessionFresh(sessionName, workDir); err != nil {
-		return fmt.Errorf("creating session: %w", err)
+		return errors.Transient("daemon.restart", err).
+			WithHint("Failed to create tmux session. Check tmux is installed and functioning").
+			WithContext("session", sessionName).
+			WithContext("work_dir", workDir)
 	}
 
 	// Set environment variables
@@ -384,7 +416,10 @@ func (d *Daemon) restartSession(sessionName, identity string) error {
 	// Get and send startup command
 	startCmd := d.getStartCommand(config, parsed)
 	if err := d.tmux.SendKeys(sessionName, startCmd); err != nil {
-		return fmt.Errorf("sending startup command: %w", err)
+		return errors.Transient("daemon.restart", err).
+			WithHint("Failed to send startup command to tmux. Check session exists and is accessible").
+			WithContext("session", sessionName).
+			WithContext("command", startCmd)
 	}
 
 	// Wait for Claude to start, then accept bypass permissions warning if it appears.
@@ -619,7 +654,10 @@ func (d *Daemon) closeMessage(id string) error {
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("gt mail delete %s: %v (output: %s)", id, err, string(output))
+		return errors.Transient("daemon.mail", err).
+			WithHint("Failed to delete lifecycle message. Check gt mail is working").
+			WithContext("message_id", id).
+			WithContext("output", string(output))
 	}
 	d.logger.Printf("Deleted lifecycle message: %s", id)
 	return nil
@@ -657,7 +695,9 @@ func (d *Daemon) getAgentBeadInfo(agentBeadID string) (*AgentBeadInfo, error) {
 
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("bd show %s: %w", agentBeadID, err)
+		return nil, errors.Transient("daemon.beads", err).
+			WithHint("Failed to fetch agent bead. Check bd command is available").
+			WithContext("bead_id", agentBeadID)
 	}
 
 	// bd show --json returns an array with one element
@@ -671,16 +711,24 @@ func (d *Daemon) getAgentBeadInfo(agentBeadID string) (*AgentBeadInfo, error) {
 	}
 
 	if err := json.Unmarshal(output, &issues); err != nil {
-		return nil, fmt.Errorf("parsing bd show output: %w", err)
+		return nil, errors.Permanent("daemon.beads", err).
+			WithHint("Invalid JSON from bd show command. Check beads database integrity").
+			WithContext("bead_id", agentBeadID).
+			WithContext("output", string(output))
 	}
 
 	if len(issues) == 0 {
-		return nil, fmt.Errorf("agent bead not found: %s", agentBeadID)
+		return nil, errors.User("daemon.beads", "agent bead not found: "+agentBeadID).
+			WithHint("The agent bead does not exist. Check agent is registered with 'bd list --type=agent'").
+			WithContext("bead_id", agentBeadID)
 	}
 
 	issue := issues[0]
 	if issue.Type != "agent" {
-		return nil, fmt.Errorf("bead %s is not an agent bead (type=%s)", agentBeadID, issue.Type)
+		return nil, errors.User("daemon.beads", fmt.Sprintf("bead %s is not an agent bead (type=%s)", agentBeadID, issue.Type)).
+			WithHint("The specified bead is not an agent bead. Check bead ID is correct").
+			WithContext("bead_id", agentBeadID).
+			WithContext("bead_type", issue.Type)
 	}
 
 	// Parse agent fields from description for role/state info
