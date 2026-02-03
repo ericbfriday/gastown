@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/steveyegge/gastown/internal/filelock"
 )
 
 // State represents the global Gas Town state.
@@ -78,43 +79,60 @@ func IsEnabled() bool {
 	return state.Enabled
 }
 
-// Load reads the state from disk.
+// Load reads the state from disk with file locking.
 func Load() (*State, error) {
-	data, err := os.ReadFile(StatePath())
-	if os.IsNotExist(err) {
-		return nil, err
-	}
+	path := StatePath()
+
+	var state State
+	err := filelock.WithReadLock(path, func() error {
+		data, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			return err
+		}
+		if err != nil {
+			return err
+		}
+
+		if err := json.Unmarshal(data, &state); err != nil {
+			return err
+		}
+		return nil
+	})
+
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, err
+		}
 		return nil, err
 	}
 
-	var state State
-	if err := json.Unmarshal(data, &state); err != nil {
-		return nil, err
-	}
 	return &state, nil
 }
 
-// Save writes the state to disk atomically.
+// Save writes the state to disk atomically with file locking.
 func Save(s *State) error {
-	dir := StateDir()
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
+	path := StatePath()
 
-	s.UpdatedAt = time.Now()
+	return filelock.WithWriteLock(path, func() error {
+		dir := StateDir()
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return err
+		}
 
-	data, err := json.MarshalIndent(s, "", "  ")
-	if err != nil {
-		return err
-	}
+		s.UpdatedAt = time.Now()
 
-	// Atomic write via temp file
-	tmp := StatePath() + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, StatePath())
+		data, err := json.MarshalIndent(s, "", "  ")
+		if err != nil {
+			return err
+		}
+
+		// Atomic write via temp file
+		tmp := path + ".tmp"
+		if err := os.WriteFile(tmp, data, 0600); err != nil {
+			return err
+		}
+		return os.Rename(tmp, path)
+	})
 }
 
 // Enable enables Gas Town globally.

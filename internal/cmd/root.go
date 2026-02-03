@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/prompt"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/ui"
 	"github.com/steveyegge/gastown/internal/version"
@@ -82,6 +83,11 @@ func persistentPreRun(cmd *cobra.Command, args []string) error {
 
 	// Initialize CLI theme (dark/light mode support)
 	initCLITheme()
+
+	// Set global prompt config from flags
+	if yes, _ := cmd.Flags().GetBool("yes"); yes {
+		prompt.GlobalConfig.Yes = true
+	}
 
 	// Get the root command name being run
 	cmdName := cmd.Name()
@@ -258,8 +264,8 @@ func init() {
 	rootCmd.SetHelpCommandGroupID(GroupDiag)
 	rootCmd.SetCompletionCommandGroupID(GroupConfig)
 
-	// Global flags can be added here
-	// rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file")
+	// Global flags
+	rootCmd.PersistentFlags().BoolP("yes", "y", false, "Skip all confirmation prompts (auto-yes)")
 }
 
 // buildCommandPath walks the command hierarchy to build the full command path.

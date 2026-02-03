@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/mayor"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/prompt"
 	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
@@ -483,15 +484,12 @@ func runShutdown(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 
 	// Confirmation prompt
-	if !shutdownYes && !shutdownForce {
-		fmt.Printf("Proceed with shutdown? [y/N] ")
-		reader := bufio.NewReader(os.Stdin)
-		response, _ := reader.ReadString('\n')
-		response = strings.TrimSpace(strings.ToLower(response))
-		if response != "y" && response != "yes" {
-			fmt.Println("Shutdown canceled.")
-			return nil
-		}
+	if !prompt.ConfirmBatch("Proceed with shutdown of", len(sessionNames),
+		prompt.WithForce(shutdownForce),
+		prompt.WithYes(shutdownYes),
+	) {
+		fmt.Println("Shutdown canceled.")
+		return nil
 	}
 
 	if shutdownGraceful {

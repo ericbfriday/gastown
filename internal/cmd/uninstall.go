@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/prompt"
 	"github.com/steveyegge/gastown/internal/shell"
 	"github.com/steveyegge/gastown/internal/state"
 	"github.com/steveyegge/gastown/internal/style"
@@ -55,33 +56,36 @@ func init() {
 }
 
 func runUninstall(cmd *cobra.Command, args []string) error {
-	if !uninstallForce {
-		fmt.Println("This will remove Gas Town from your system.")
+	fmt.Println("This will remove Gas Town from your system.")
+	fmt.Println()
+	fmt.Println("The following will be removed:")
+	fmt.Printf("  • Shell integration (%s)\n", shell.RCFilePath(shell.DetectShell()))
+	fmt.Printf("  • Wrapper scripts (%s)\n", wrappers.BinDir())
+	fmt.Printf("  • State directory (%s)\n", state.StateDir())
+	fmt.Printf("  • Config directory (%s)\n", state.ConfigDir())
+	fmt.Printf("  • Cache directory (%s)\n", state.CacheDir())
+
+	if uninstallWorkspace {
 		fmt.Println()
-		fmt.Println("The following will be removed:")
-		fmt.Printf("  • Shell integration (%s)\n", shell.RCFilePath(shell.DetectShell()))
-		fmt.Printf("  • Wrapper scripts (%s)\n", wrappers.BinDir())
-		fmt.Printf("  • State directory (%s)\n", state.StateDir())
-		fmt.Printf("  • Config directory (%s)\n", state.ConfigDir())
-		fmt.Printf("  • Cache directory (%s)\n", state.CacheDir())
+		fmt.Printf("  %s WORKSPACE WILL BE DELETED\n", style.Warning.Render("⚠"))
+		fmt.Println("     This cannot be undone!")
+	}
 
-		if uninstallWorkspace {
-			fmt.Println()
-			fmt.Printf("  %s WORKSPACE WILL BE DELETED\n", style.Warning.Render("⚠"))
-			fmt.Println("     This cannot be undone!")
+	fmt.Println()
+
+	// Use danger prompt for uninstall, especially if removing workspace
+	var confirmFunc func(string, ...prompt.Option) bool
+	if uninstallWorkspace {
+		confirmFunc = prompt.ConfirmDanger
+	} else {
+		confirmFunc = func(msg string, opts ...prompt.Option) bool {
+			return prompt.Confirm(msg, opts...)
 		}
+	}
 
-		fmt.Println()
-		fmt.Print("Continue? [y/N] ")
-
-		reader := bufio.NewReader(os.Stdin)
-		response, _ := reader.ReadString('\n')
-		response = strings.TrimSpace(strings.ToLower(response))
-
-		if response != "y" && response != "yes" {
-			fmt.Println("Aborted.")
-			return nil
-		}
+	if !confirmFunc("Continue?", prompt.WithForce(uninstallForce)) {
+		fmt.Println("Aborted.")
+		return nil
 	}
 
 	var errors []string

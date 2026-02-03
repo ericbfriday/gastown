@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/prompt"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -439,16 +440,14 @@ func runOrphansKill(cmd *cobra.Command, args []string) error {
 	}
 
 	// Confirmation
-	if !orphansKillForce {
-		fmt.Printf("%s\n", style.Warning.Render("WARNING: This operation is irreversible!"))
-		total := len(filteredCommits) + len(procOrphans)
-		fmt.Printf("Remove %d orphan(s)? [y/N] ", total)
-		var response string
-		_, _ = fmt.Scanln(&response)
-		if strings.ToLower(strings.TrimSpace(response)) != "y" {
-			fmt.Printf("%s Canceled\n", style.Dim.Render("ℹ"))
-			return nil
-		}
+	fmt.Printf("%s\n", style.Warning.Render("WARNING: This operation is irreversible!"))
+	total := len(filteredCommits) + len(procOrphans)
+	if !prompt.ConfirmDanger(
+		fmt.Sprintf("Remove %d orphan(s)?", total),
+		prompt.WithForce(orphansKillForce),
+	) {
+		fmt.Printf("%s Canceled\n", style.Dim.Render("ℹ"))
+		return nil
 	}
 
 	// Kill orphaned commits
@@ -706,15 +705,12 @@ func runOrphansKillProcesses(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 
 	// Confirm unless --force
-	if !orphansProcsForce {
-		fmt.Printf("Kill these %d process(es)? [y/N] ", len(orphans))
-		var response string
-		_, _ = fmt.Scanln(&response)
-		response = strings.ToLower(strings.TrimSpace(response))
-		if response != "y" && response != "yes" {
-			fmt.Println("Aborted")
-			return nil
-		}
+	if !prompt.ConfirmDanger(
+		fmt.Sprintf("Kill these %d process(es)?", len(orphans)),
+		prompt.WithForce(orphansProcsForce),
+	) {
+		fmt.Println("Aborted")
+		return nil
 	}
 
 	// Kill the processes
@@ -783,15 +779,12 @@ func runOrphansKillProcessesAggressive() error {
 	fmt.Println()
 
 	// Confirm unless --force
-	if !orphansProcsForce {
-		fmt.Printf("Kill these %d process(es)? [y/N] ", len(zombies))
-		var response string
-		_, _ = fmt.Scanln(&response)
-		response = strings.ToLower(strings.TrimSpace(response))
-		if response != "y" && response != "yes" {
-			fmt.Println("Aborted")
-			return nil
-		}
+	if !prompt.ConfirmDanger(
+		fmt.Sprintf("Kill these %d process(es)?", len(zombies)),
+		prompt.WithForce(orphansProcsForce),
+	) {
+		fmt.Println("Aborted")
+		return nil
 	}
 
 	// Kill the processes

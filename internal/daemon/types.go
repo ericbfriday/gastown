@@ -110,10 +110,11 @@ type PatrolConfig struct {
 
 // PatrolsConfig holds configuration for all patrols.
 type PatrolsConfig struct {
-	Refinery   *PatrolConfig     `json:"refinery,omitempty"`
-	Witness    *PatrolConfig     `json:"witness,omitempty"`
-	Deacon     *PatrolConfig     `json:"deacon,omitempty"`
-	DoltServer *DoltServerConfig `json:"dolt_server,omitempty"`
+	Refinery         *PatrolConfig     `json:"refinery,omitempty"`
+	Witness          *PatrolConfig     `json:"witness,omitempty"`
+	Deacon           *PatrolConfig     `json:"deacon,omitempty"`
+	DoltServer       *DoltServerConfig `json:"dolt_server,omitempty"`
+	MailOrchestrator *PatrolConfig     `json:"mail_orchestrator,omitempty"`
 }
 
 // DaemonPatrolConfig is the structure of mayor/daemon.json.
@@ -164,6 +165,10 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 	case "deacon":
 		if config.Patrols.Deacon != nil {
 			return config.Patrols.Deacon.Enabled
+		}
+	case "mail-orchestrator":
+		if config.Patrols.MailOrchestrator != nil {
+			return config.Patrols.MailOrchestrator.Enabled
 		}
 	}
 	return true // Default: enabled

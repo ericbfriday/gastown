@@ -60,3 +60,26 @@ func runBdCommand(args []string, workDir, beadsDir string, extraEnv ...string) (
 
 	return stdout.Bytes(), nil
 }
+
+// RunBdCommand is the exported version of runBdCommand for use by other packages.
+func RunBdCommand(args []string, workDir, beadsDir string, extraEnv ...string) ([]byte, error) {
+	cmd := exec.Command("bd", args...) //nolint:gosec // G204: bd is a trusted internal tool
+	cmd.Dir = workDir
+
+	env := append(cmd.Environ(), "BEADS_DIR="+beadsDir)
+	env = append(env, extraEnv...)
+	cmd.Env = env
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return nil, &bdError{
+			Err:    err,
+			Stderr: strings.TrimSpace(stderr.String()),
+		}
+	}
+
+	return stdout.Bytes(), nil
+}

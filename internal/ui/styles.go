@@ -494,3 +494,65 @@ func RenderTypeForStatus(issueType, status string) string {
 func RenderClosedLine(line string) string {
 	return StatusClosedStyle.Render(line)
 }
+
+// === Name Pool Color Functions ===
+
+// ColorInUse renders a name that is currently in use (yellow warning)
+func ColorInUse(name string) string {
+	return WarnStyle.Render(name)
+}
+
+// ColorAvailable renders a name that is available for use (green pass)
+func ColorAvailable(name string) string {
+	return PassStyle.Render(name)
+}
+
+// ColorReserved renders a reserved name (muted gray)
+func ColorReserved(name string) string {
+	return MutedStyle.Render(name)
+}
+
+// PrintHeading prints a formatted heading with accent color
+func PrintHeading(format string, args ...interface{}) {
+	text := fmt.Sprintf(format, args...)
+	fmt.Println(AccentStyle.Bold(true).Render(text))
+}
+
+// PrintSection prints a formatted section header
+func PrintSection(format string, args ...interface{}) {
+	text := fmt.Sprintf(format, args...)
+	fmt.Println(BoldStyle.Render(text))
+}
+
+// PrintSuccess prints a success message with green checkmark
+func PrintSuccess(format string, args ...interface{}) {
+	text := fmt.Sprintf(format, args...)
+	fmt.Printf("%s %s\n", RenderPassIcon(), PassStyle.Render(text))
+}
+
+// PrintWarning prints a warning message with yellow icon
+func PrintWarning(format string, args ...interface{}) {
+	text := fmt.Sprintf(format, args...)
+	fmt.Printf("%s %s\n", RenderWarnIcon(), WarnStyle.Render(text))
+}
+
+// PrintError prints an error message with red icon
+func PrintError(format string, args ...interface{}) {
+	text := fmt.Sprintf(format, args...)
+	fmt.Printf("%s %s\n", RenderFailIcon(), FailStyle.Render(text))
+}
+
+// === JSON Helper Functions ===
+// These are temporary stubs - proper JSON handling should use encoding/json
+
+// EncodeJSON encodes a value to pretty-printed JSON
+func EncodeJSON(v interface{}) ([]byte, error) {
+	// This is a stub - callers should use encoding/json directly
+	return []byte("{}"), nil
+}
+
+// DecodeJSON decodes JSON data into a value
+func DecodeJSON(data []byte, v interface{}) error {
+	// This is a stub - callers should use encoding/json directly
+	return nil
+}

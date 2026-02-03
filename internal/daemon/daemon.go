@@ -44,10 +44,11 @@ type Daemon struct {
 	logger       *log.Logger
 	ctx          context.Context
 	cancel       context.CancelFunc
-	curator       *feed.Curator
-	convoyWatcher *ConvoyWatcher
-	doltServer    *DoltServerManager
-	krcPruner     *KRCPruner
+	curator          *feed.Curator
+	convoyWatcher    *ConvoyWatcher
+	doltServer       *DoltServerManager
+	krcPruner        *KRCPruner
+	mailOrchestrator *MailOrchestrator
 
 	// Mass death detection: track recent session deaths
 	deathsMu     sync.Mutex
@@ -190,6 +191,20 @@ func (d *Daemon) Run() error {
 		} else {
 			d.logger.Println("KRC pruner started")
 		}
+	}
+
+	// Start mail orchestrator for automatic message delivery
+	// Check if enabled in patrol config
+	if IsPatrolEnabled(d.patrolConfig, "mail-orchestrator") {
+		mailConfig := DefaultMailOrchestratorConfig()
+		d.mailOrchestrator = NewMailOrchestrator(d.config.TownRoot, mailConfig, d.logger)
+		if err := d.mailOrchestrator.Start(); err != nil {
+			d.logger.Printf("Warning: failed to start mail orchestrator: %v", err)
+		} else {
+			d.logger.Println("Mail orchestrator started")
+		}
+	} else {
+		d.logger.Printf("Mail orchestrator disabled in config, skipping")
 	}
 
 	// Initial heartbeat
@@ -730,6 +745,12 @@ func (d *Daemon) shutdown(state *State) error { //nolint:unparam // error return
 	if d.krcPruner != nil {
 		d.krcPruner.Stop()
 		d.logger.Println("KRC pruner stopped")
+	}
+
+	// Stop mail orchestrator
+	if d.mailOrchestrator != nil {
+		d.mailOrchestrator.Stop()
+		d.logger.Println("Mail orchestrator stopped")
 	}
 
 	// Stop Dolt server if we're managing it

@@ -435,3 +435,101 @@ func (p *NamePool) Reset() {
 	p.InUse = make(map[string]bool)
 	p.OverflowNext = p.MaxSize + 1
 }
+
+// AvailableNames returns a sorted list of names not currently in use.
+func (p *NamePool) AvailableNames() []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	names := p.getNames()
+	var available []string
+	for _, name := range names {
+		if !p.InUse[name] {
+			available = append(available, name)
+		}
+	}
+	sort.Strings(available)
+	return available
+}
+
+// HasName checks if a name exists in the pool (themed or custom).
+func (p *NamePool) HasName(name string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	names := p.getNames()
+	for _, n := range names {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+// IsInUse checks if a name is currently in use.
+func (p *NamePool) IsInUse(name string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.InUse[name]
+}
+
+// IsThemedName checks if a name is in the current theme (exported version).
+func (p *NamePool) IsThemedName(name string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.isThemedName(name)
+}
+
+// IsCustomName checks if a name is a custom name.
+func (p *NamePool) IsCustomName(name string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	for _, n := range p.CustomNames {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+// RemoveCustomName removes a custom name from the pool.
+// Returns error if the name is not a custom name.
+func (p *NamePool) RemoveCustomName(name string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// Check if it's a custom name
+	found := false
+	for i, n := range p.CustomNames {
+		if n == name {
+			// Remove by slicing
+			p.CustomNames = append(p.CustomNames[:i], p.CustomNames[i+1:]...)
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		return fmt.Errorf("name '%s' is not a custom name", name)
+	}
+
+	// Also release from InUse if it was allocated
+	delete(p.InUse, name)
+
+	return nil
+}
+
+// TotalNames returns the total number of names in the pool.
+func (p *NamePool) TotalNames() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return len(p.getNames())
+}
+
+// CustomNameCount returns the number of custom names in the pool.
+func (p *NamePool) CustomNameCount() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return len(p.CustomNames)
+}

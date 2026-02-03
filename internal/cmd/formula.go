@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/prompt"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
 	"golang.org/x/text/cases"
@@ -955,10 +956,7 @@ Perform the patrol inspection.
 }
 
 // promptYesNo asks the user a yes/no question
+// Deprecated: Use prompt.Confirm instead
 func promptYesNo(question string) bool {
-	fmt.Printf("%s [y/N]: ", question)
-	reader := bufio.NewReader(os.Stdin)
-	answer, _ := reader.ReadString('\n')
-	answer = strings.TrimSpace(strings.ToLower(answer))
-	return answer == "y" || answer == "yes"
+	return prompt.Confirm(question)
 }
