@@ -1,0 +1,251 @@
+{
+  "project": {
+    "name": "Gas Town",
+    "slug": "gt",
+    "repository": "github.com/steveyegge/gastown",
+    "language": "Go",
+    "go_version": "1.24.2",
+    "generated": "2026-02-04",
+    "total_lines_of_code": 195000,
+    "description": "Multi-agent orchestration system for Claude Code with persistent work tracking"
+  },
+  "entry_points": {
+    "cli": {
+      "path": "cmd/gt/main.go",
+      "description": "Main CLI application entry point",
+      "framework": "spf13/cobra",
+      "command_count": "100+"
+    },
+    "primary_interface": "gt mayor attach",
+    "key_commands": [
+      "gt install <path>",
+      "gt mayor attach",
+      "gt sling <bead-id> <rig>",
+      "gt convoy create <name>",
+      "gt crew add <name>",
+      "gt rig add <name> <repo>"
+    ]
+  },
+  "core_modules": {
+    "agent_management": [
+      "internal/polecat",
+      "internal/mayor",
+      "internal/crew",
+      "internal/agent"
+    ],
+    "work_orchestration": [
+      "internal/convoy",
+      "internal/beads",
+      "internal/mail",
+      "internal/mq"
+    ],
+    "persistence_git": [
+      "internal/hooks",
+      "internal/git",
+      "internal/rig",
+      "internal/workspace"
+    ],
+    "runtime_integration": [
+      "internal/runtime",
+      "internal/session",
+      "internal/tmux"
+    ],
+    "daemon_background": [
+      "internal/daemon",
+      "internal/deacon",
+      "internal/dog",
+      "internal/witness"
+    ],
+    "configuration_state": [
+      "internal/config",
+      "internal/state",
+      "internal/checkpoint"
+    ],
+    "developer_tools": [
+      "internal/doctor",
+      "internal/feed",
+      "internal/monitoring",
+      "internal/web"
+    ],
+    "formula_system": [
+      "internal/formula",
+      "internal/planconvert",
+      "internal/planoracle",
+      "internal/mergeoracle"
+    ],
+    "ui_display": [
+      "internal/ui",
+      "internal/tui",
+      "internal/style",
+      "internal/townlog"
+    ],
+    "utilities": [
+      "internal/errors",
+      "internal/events",
+      "internal/filelock",
+      "internal/lock",
+      "internal/util",
+      "internal/version"
+    ]
+  },
+  "architecture": {
+    "pattern": "MEOW (Mayor-Enhanced Orchestration Workflow)",
+    "propulsion_principle": "Git hooks as persistent state mechanism",
+    "work_flow": "User → Mayor → Convoy → Beads → Polecats → Hooks → Git",
+    "agent_roles": {
+      "mayor": "AI coordinator (primary interface)",
+      "crew": "Human workspace",
+      "polecat": "Worker agent (ephemeral)",
+      "hook": "Persistent storage (git worktree)"
+    }
+  },
+  "key_concepts": {
+    "mayor": "Primary AI coordinator with full workspace context",
+    "town": "Workspace directory (e.g., ~/gt/)",
+    "rigs": "Project containers wrapping git repositories",
+    "crew": "Personal workspace within a rig",
+    "polecats": "Ephemeral worker agents",
+    "hooks": "Git worktree-based persistent storage",
+    "convoys": "Work tracking units bundling multiple beads",
+    "beads": "Git-backed issue tracking (format: prefix-abc12)"
+  },
+  "configuration_files": {
+    "workspace": [
+      "settings/config.json",
+      ".beads/formulas/*.toml",
+      "mayor/rigs.json"
+    ],
+    "runtime": [
+      ".claude/settings.json",
+      "~/.codex/config.toml",
+      "settings/agents.json"
+    ],
+    "git": [
+      ".git/",
+      ".githooks/",
+      ".gitignore"
+    ]
+  },
+  "documentation": {
+    "getting_started": [
+      "README.md",
+      "docs/INSTALLING.md",
+      "docs/overview.md",
+      "docs/glossary.md"
+    ],
+    "architecture": [
+      "docs/architecture/",
+      "docs/design/",
+      "docs/concepts/"
+    ],
+    "integration": [
+      "docs/hooks-integration-summary.md",
+      "docs/MAIL_ORCHESTRATOR_SUMMARY.md",
+      "docs/FILELOCK_INTEGRATION_SUMMARY.md",
+      "docs/ERROR_HANDLING.md"
+    ],
+    "workflows": [
+      "docs/CLAUDE-HARNESS-WORKFLOW.md",
+      "docs/SESSION-CYCLING-UX.md",
+      "docs/prompt-system.md",
+      "docs/mayor-cli.md"
+    ]
+  },
+  "dependencies": {
+    "core_framework": {
+      "spf13/cobra": "v1.10.2",
+      "BurntSushi/toml": "v1.6.0"
+    },
+    "terminal_ui": {
+      "charmbracelet/bubbletea": "v1.3.10",
+      "charmbracelet/lipgloss": "v1.1.1",
+      "charmbracelet/glamour": "v0.10.0",
+      "charmbracelet/bubbles": "v0.21.0"
+    },
+    "system_integration": {
+      "gofrs/flock": "v0.13.0",
+      "google/uuid": "v1.6.0",
+      "go-rod/rod": "v0.116.2",
+      "golang.org/x/sys": "v0.39.0",
+      "golang.org/x/term": "v0.38.0"
+    }
+  },
+  "test_coverage": {
+    "unit_tests": "100+",
+    "integration_tests": "20+",
+    "e2e_tests": "Multiple",
+    "test_helpers": "internal/cmd/test_helpers_test.go",
+    "harness": "harness/"
+  },
+  "statistics": {
+    "go_files": "600+",
+    "total_lines": 195000,
+    "internal_packages": "60+",
+    "test_files": "100+",
+    "formulas": 32,
+    "documentation_files": "35+",
+    "templates": "4+"
+  },
+  "key_features": [
+    "Multi-agent orchestration (20-30+ agents)",
+    "Persistent work state in git hooks",
+    "Automated coordination & handoffs",
+    "Git-backed Beads issue tracking",
+    "Convoy work distribution system",
+    "Formula-based repeatable workflows",
+    "Multi-runtime support (Claude, Codex, Cursor, Gemini)",
+    "Web dashboard for monitoring",
+    "Rich terminal UI (Bubble Tea)",
+    "Comprehensive diagnostics"
+  ],
+  "common_operations": {
+    "health_checks": [
+      "gt doctor",
+      "gt doctor --fix"
+    ],
+    "monitoring": [
+      "gt agents",
+      "gt convoy list",
+      "gt feed",
+      "gt dashboard"
+    ],
+    "maintenance": [
+      "gt hooks list",
+      "gt hooks repair",
+      "gt convoy refresh"
+    ]
+  },
+  "supported_runtimes": [
+    "Claude Code (default)",
+    "Codex CLI",
+    "Cursor",
+    "Gemini",
+    "Custom via config"
+  ],
+  "quick_start": {
+    "install": "go install github.com/steveyegge/gastown/cmd/gt@latest",
+    "init_workspace": "gt install ~/gt --git",
+    "add_project": "gt rig add myproject https://github.com/you/repo.git",
+    "create_crew": "gt crew add yourname --rig myproject",
+    "start_mayor": "gt mayor attach"
+  },
+  "learning_path": [
+    "README.md - Understand the problem & solution",
+    "docs/glossary.md - Learn terminology",
+    "docs/architecture/ - System design",
+    "gt install ~/gt --git - Hands-on experience",
+    "docs/implementation/ - Deep dives"
+  ],
+  "critical_patterns": {
+    "primary_interface": "Always use the Mayor for orchestration",
+    "work_tracking": "Beads (issue IDs) format: prefix-abc12",
+    "persistence": "Hooks provide git-backed persistent state",
+    "coordination": "Convoys bundle related work for visibility"
+  },
+  "token_efficiency": {
+    "index_size": "~3000 tokens",
+    "full_codebase": "~58000+ tokens",
+    "reduction": "94%",
+    "roi": "Immediate - break-even after 1 session"
+  }
+}

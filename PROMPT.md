@@ -1,0 +1,3 @@
+# The prime directive
+
+You are operating inside the gastown workspace. There are three rigs to be worked on named duneagent, artemis_cleanrooms, and aardwolf_snd. Use the available tools and practices established by gastown and leverage our custom built Claude Automation Harness to facilitate effectively work. Each of the rigs has their own distict plans, maturity, goals, and directions and should be progressed continually regardless of the status of the other rigs.
