@@ -9,6 +9,15 @@
         "prefix": "as"
       }
     },
+    "artemis_cleanrooms": {
+      "git_url": "git@github.com:ericbfriday/artemis-reverse-sandbox.git",
+      "local_repo": "/Users/ericfriday/dev/artemis-reverse-sandbox",
+      "added_at": "2026-02-04T03:18:04.966837-06:00",
+      "beads": {
+        "repo": "",
+        "prefix": "ac"
+      }
+    },
     "duneagent": {
       "git_url": "git@github.com:ericbfriday/duneagent.git",
       "added_at": "2026-01-21T20:22:15.356817-06:00",

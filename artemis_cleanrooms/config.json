@@ -1,0 +1,12 @@
+{
+  "type": "rig",
+  "version": 1,
+  "name": "artemis_cleanrooms",
+  "git_url": "git@github.com:ericbfriday/artemis-reverse-sandbox.git",
+  "local_repo": "/Users/ericfriday/dev/artemis-reverse-sandbox",
+  "default_branch": "master",
+  "created_at": "2026-02-04T03:17:58.285064-06:00",
+  "beads": {
+    "prefix": "ac"
+  }
+}
