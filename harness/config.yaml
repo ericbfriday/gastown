@@ -14,6 +14,7 @@ harness:
   # Work routing
   default_rig: aardwolf_snd  # Default rig if none specified
   rig_priority:  # Order for checking work across rigs
+    - artemis_cleanrooms
     - aardwolf_snd
     - duneagent
 
@@ -109,6 +110,12 @@ rigs:
     main_branch: main
     test_command: "cd mayor/rig && go test ./..."
     build_command: "cd mayor/rig && go build ./..."
+
+  artemis_cleanrooms:
+    path: ~/gt/artemis_cleanrooms
+    main_branch: master
+    test_command: "cd crew/ericfriday/game && bun test"
+    build_command: "cd crew/ericfriday/game && bun run build"
 
   duneagent:
     path: ~/gt/duneagent

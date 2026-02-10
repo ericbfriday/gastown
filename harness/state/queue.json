@@ -1,1 +1,42 @@
-[]
+[
+  {
+    "id": "ac-game-005",
+    "type": "feature",
+    "rig": "artemis_cleanrooms",
+    "priority": 1,
+    "title": "Integration testing - full multiplayer gameplay",
+    "status": "queued"
+  },
+  {
+    "id": "ac-game-006",
+    "type": "feature",
+    "rig": "artemis_cleanrooms",
+    "priority": 2,
+    "title": "Default game scenario and mission scripting",
+    "status": "queued"
+  },
+  {
+    "id": "ac-game-010",
+    "type": "feature",
+    "rig": "artemis_cleanrooms",
+    "priority": 2,
+    "title": "Add error handling and connection resilience",
+    "status": "queued"
+  },
+  {
+    "id": "ac-game-011",
+    "type": "feature",
+    "rig": "artemis_cleanrooms",
+    "priority": 2,
+    "title": "Polish web client UI - bridge consoles",
+    "status": "queued"
+  },
+  {
+    "id": "ac-game-012",
+    "type": "feature",
+    "rig": "artemis_cleanrooms",
+    "priority": 2,
+    "title": "Add multi-ship support and lobby management",
+    "status": "queued"
+  }
+]
